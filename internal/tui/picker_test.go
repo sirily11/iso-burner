@@ -20,7 +20,7 @@ func TestFolderPickerBrowsesAndChoosesFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := New(Options{Folder: root})
+	m := New(Options{Mode: ModeGenerate, Folder: root})
 	if m.picking {
 		t.Fatal("picker should stay closed when a folder is pre-filled")
 	}
@@ -52,7 +52,7 @@ func TestFolderPickerBrowsesAndChoosesFolder(t *testing.T) {
 }
 
 func TestFolderPickerOpensWithoutFolderAndEscReturnsToInput(t *testing.T) {
-	m := New(Options{})
+	m := New(Options{Mode: ModeGenerate})
 	if !m.picking {
 		t.Fatal("picker should open when no folder is given")
 	}
