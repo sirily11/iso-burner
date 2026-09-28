@@ -154,7 +154,8 @@ func (m Model) startBurning() (tea.Model, tea.Cmd) {
 		// The drive step asks for blank discs to be loaded before confirming.
 		loaded = true
 	}
-	engine, err := burn.Start(burn.Config{Store: m.store, Session: id, Drives: drives, Burner: m.burner, DiscsLoaded: loaded})
+	engine, err := burn.Start(burn.Config{Store: m.store, Session: id, Drives: drives, Burner: m.burner,
+		Speed: burn.Speed(m.recent.Speed), DiscsLoaded: loaded})
 	if err != nil {
 		m.burnErr = err
 		return m, nil
@@ -381,6 +382,9 @@ func (m Model) burnProgressView() string {
 		switch d.State {
 		case store.DriveBurning:
 			state = fmt.Sprintf("burning %s · %s / %s", discLabel(d.Disc), settings.FormatBytes(d.Progress), settings.FormatBytes(d.Total))
+			if d.Speed != "" {
+				state += " · " + truncate(d.Speed, 50)
+			}
 		case store.DriveVerifying:
 			state = fmt.Sprintf("checking %s · %s / %s", discLabel(d.Disc), settings.FormatBytes(d.Progress), settings.FormatBytes(d.Total))
 		case store.DriveWaiting:

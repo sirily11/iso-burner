@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sirily11/iso-burner/internal/burn"
 	"github.com/sirily11/iso-burner/internal/drive"
 )
 
@@ -101,6 +102,11 @@ func (m Model) updateReplicas(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 // copies step with its counts intact, or to the resume dialog when resuming.
 // Confirming starts burning.
 func (m Model) updateDrives(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok && key.String() == "s" {
+		m.recent.Speed = int(nextSpeed(burn.Speed(m.recent.Speed)))
+		m.saveRecent()
+		return m, nil
+	}
 	var cmd tea.Cmd
 	m.drives, cmd = m.drives.update(msg)
 	switch {
@@ -123,6 +129,16 @@ func (m Model) updateDrives(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 	}
 	return m, cmd
+}
+
+// nextSpeed is the write speed after s in burn.Speeds, wrapping around.
+func nextSpeed(s burn.Speed) burn.Speed {
+	for i, v := range burn.Speeds {
+		if v == s {
+			return burn.Speeds[(i+1)%len(burn.Speeds)]
+		}
+	}
+	return burn.SpeedMax
 }
 
 // BurnDrives returns the disc drives chosen in burn mode, or nil if the user
@@ -170,10 +186,12 @@ func (m Model) burnView() string {
 			b.WriteString(selectedStyle.Render("Load a blank disc in every selected drive before confirming.") + "\n\n")
 		}
 		b.WriteString(m.drives.body())
+		b.WriteString("\n" + labelStyle.Render("Write speed") + "  " + burn.Speed(m.recent.Speed).String() +
+			dimStyle.Render("  (s: change · the drive picks the nearest speed it supports)") + "\n")
 		if m.burnErr != nil {
 			b.WriteString("\n" + errorStyle.Render("✗ "+m.burnErr.Error()) + "\n")
 		}
-		b.WriteString("\n" + dimStyle.Render(strings.Replace(m.drives.help(), "enter: confirm", "enter: start burning", 1)+" · "+back))
+		b.WriteString("\n" + dimStyle.Render(strings.Replace(m.drives.help(), "enter: confirm", "s: speed · enter: start burning", 1)+" · "+back))
 		return panelStyle.Render(b.String()) + "\n"
 	}
 	if m.resumeOffer != nil {
