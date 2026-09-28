@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,8 +17,10 @@ import (
 
 	"github.com/sirily11/iso-burner/internal/auth"
 	"github.com/sirily11/iso-burner/internal/iso"
+	"github.com/sirily11/iso-burner/internal/media"
 	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/settings"
+	"github.com/sirily11/iso-burner/internal/upload"
 )
 
 type testToken struct{}
@@ -235,3 +238,37 @@ func waitUntil(t *testing.T, what string, cond func() bool) {
 }
 
 var settingsForTest = settings.Settings{Folder: "x", Preset: settings.Presets[0], ISOName: "backup"}
+
+func TestUploadJobSnapshot(t *testing.T) {
+	m := New(Options{})
+	m.itemSearch.chosen = &remote.Item{ID: "i1", Title: "Trip"}
+	m.uploadFiles.matched = []settings.File{{RelPath: "a/clip.mp4", Size: 1000}, {RelPath: "b.jpg", Size: 100}, {RelPath: "c.jpg", Size: 10}}
+	m.uploadFiles.run = uploadRun{running: true, started: time.Now(), statuses: []upload.FileStatus{
+		{Stage: upload.StageDone},
+		{Stage: upload.StageFailed, Err: errors.New("boom")},
+		{Stage: upload.StageUploading, Kind: media.KindVideo, Fraction: 0.5},
+	}}
+	job := m.uploadJob()
+	if job.Kind != remote.KindUpload || job.Status != remote.StatusRunning || job.Title != "Upload to Trip" ||
+		job.DoneCount != 1 || job.TotalCount != 3 || job.TotalBytes != 1110 || job.FinishedAt != nil {
+		t.Fatalf("running job = %+v", job)
+	}
+	// Active first, then failed, then done.
+	names := []string{job.Tasks[0].Name, job.Tasks[1].Name, job.Tasks[2].Name}
+	if names[0] != "c.jpg" || names[1] != "b.jpg" || names[2] != "clip.mp4" {
+		t.Fatalf("task order = %v", names)
+	}
+	if up := job.Tasks[0]; up.Status != "uploading" || up.Progress != 0.9 || up.Detail != "c.jpg" {
+		t.Errorf("uploading row = %+v", up)
+	}
+	if f := job.Tasks[1]; f.Error != "boom" || f.DoneBytes != 0 {
+		t.Errorf("failed row = %+v", f)
+	}
+
+	m.uploadFiles.run.running = false
+	m.uploadFiles.run.statuses[2] = upload.FileStatus{Stage: upload.StageDone}
+	job = m.uploadJob()
+	if job.Status != remote.StatusFailed || !strings.Contains(job.Error, "1 of 3") || job.FinishedAt == nil {
+		t.Errorf("job with a failed file = %+v", job)
+	}
+}

@@ -73,9 +73,12 @@ public class IsoBurnerStream : ComTypes.IStream {
 		}
 		if (pcbRead != IntPtr.Zero) Marshal.WriteInt32(pcbRead, total);
 		long pos = file.Position;
-		if (pos - reported >= (8L << 20) || pos == file.Length) {
+		if (pos - reported >= (8L << 20) || (pos == file.Length && reported != pos)) {
 			reported = pos;
 			Console.Out.WriteLine("PROGRESS " + pos);
+			// IMAPI2 reads ahead of the drive, so the disc is still being
+			// written and then closed after the last byte is read.
+			if (pos == file.Length) Console.Out.WriteLine("STAGE writing buffered data and closing the disc");
 			Console.Out.Flush();
 		}
 	}
@@ -148,6 +151,7 @@ try {
 	} catch { }
 	$stream = New-Object IsoBurnerStream $env:ISO_BURNER_ISO
 	try { $format.Write($stream) } finally { $stream.Close() }
+	Write-Output 'STAGE disc closed'
 } catch {
 	[Console]::Error.WriteLine($_.Exception.Message)
 	exit 1
@@ -185,6 +189,8 @@ func (windowsBurner) Burn(ctx context.Context, d drive.Drive, iso string, size i
 			opts.Progress(n)
 		} else if speed, ok := parseWindowsSpeed(line); ok {
 			opts.SpeedUsed(speed)
+		} else if stage, ok := parseWindowsStage(line); ok {
+			opts.Stage(stage)
 		}
 	})
 }

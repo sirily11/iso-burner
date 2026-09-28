@@ -114,6 +114,9 @@ func main() {
 	if m.Mode() == tui.ModeBurn {
 		os.Exit(burnSummary(m, dbPath))
 	}
+	if m.Mode() == tui.ModeUpload {
+		os.Exit(uploadSummary(m))
+	}
 	cfg, chunks := m.Result()
 	if cfg == nil {
 		fmt.Println("Cancelled.")
@@ -127,6 +130,26 @@ func main() {
 	for _, c := range chunks {
 		fmt.Printf("  %s  %d entries, %s of data\n", filepath.Join(absOutput, c.Name), len(c.Pieces), settings.FormatBytes(c.Size))
 	}
+}
+
+// uploadSummary prints how upload mode ended and returns the exit code.
+func uploadSummary(m tui.Model) int {
+	done, failed, total, err, ok := m.UploadResult()
+	if !ok {
+		fmt.Println("Cancelled.")
+		return 130
+	}
+	switch {
+	case err != nil:
+		fmt.Fprintln(os.Stderr, "upload failed:", err)
+		fmt.Printf("%d of %d file(s) uploaded.\n", done, total)
+		return 1
+	case failed > 0:
+		fmt.Fprintf(os.Stderr, "%d of %d file(s) failed to upload (see the log for details).\n", failed, total)
+		return 1
+	}
+	fmt.Printf("Uploaded %d file(s).\n", done)
+	return 0
 }
 
 // burnSummary prints how burn mode ended and returns the exit code.

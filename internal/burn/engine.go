@@ -30,6 +30,9 @@ type DriveStatus struct {
 	// Speed is the write speed of the current burn, when the burner
 	// reports it.
 	Speed string
+	// Stage says what the drive is doing when progress alone does not,
+	// such as closing the disc after every byte was written.
+	Stage string
 }
 
 // Snapshot is a point-in-time view of a whole session.
@@ -203,6 +206,7 @@ func (e *Engine) setState(i int, state store.DriveState, disc *store.Disc, messa
 		if state != store.DriveBurning {
 			s.Speed = ""
 		}
+		s.Stage = ""
 		s.Disc = nil
 		if disc != nil {
 			c := *disc // the worker keeps changing its own copy
@@ -298,17 +302,35 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 	if err := e.setState(i, store.DriveBurning, disc, ""); err != nil {
 		return &fatalError{err}
 	}
+	stage := func(stage string) {
+		slog.Info("burn stage", "drive", d.ID, "disc", disc.ID, "stage", stage)
+		e.update(i, func(s *DriveStatus) { s.Stage = stage })
+	}
+	progress := e.progress(i, disc.ID)
+	sent := false
 	opts := BurnOptions{
-		Speed:    e.cfg.Speed,
-		Progress: e.progress(i, disc.ID),
+		Speed: e.cfg.Speed,
+		Progress: func(n int64) {
+			progress(n)
+			// Burners count the bytes handed to the drive, which still has
+			// to write its buffer and close the disc once they are all in.
+			if !sent && n >= disc.ISOSize {
+				sent = true
+				stage("closing the disc")
+			}
+		},
 		SpeedUsed: func(speed string) {
 			slog.Info("burning", "drive", d.ID, "disc", disc.ID, "requested", e.cfg.Speed.String(), "speed", speed)
 			e.update(i, func(s *DriveStatus) { s.Speed = speed })
 		},
+		Stage: stage,
 	}
+	slog.Info("burn started", "drive", d.ID, "disc", disc.ID, "iso", disc.ISOPath, "size", disc.ISOSize, "attempt", disc.Attempts)
+	started := time.Now()
 	if err := e.cfg.Burner.Burn(e.ctx, d, disc.ISOPath, disc.ISOSize, opts); err != nil {
 		return fmt.Errorf("burn: %w", err)
 	}
+	slog.Info("burn finished", "drive", d.ID, "disc", disc.ID, "took", time.Since(started).Round(time.Second))
 
 	if err := st.StartPhase(bg, disc.ID, store.DiscVerifying, disc.ISOSize); err != nil {
 		return &fatalError{err}
@@ -318,7 +340,11 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 		return &fatalError{err}
 	}
 	note := ""
+	e.update(i, func(s *DriveStatus) { s.Stage = "waiting for the disc to be readable" })
+	slog.Info("verify started", "drive", d.ID, "disc", disc.ID)
+	started = time.Now()
 	r, err := e.openDisc(d)
+	e.update(i, func(s *DriveStatus) { s.Stage = "" })
 	if err != nil {
 		if e.ctx.Err() != nil {
 			return e.ctx.Err()
@@ -333,6 +359,7 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 		if err != nil {
 			return fmt.Errorf("verify: %w", err)
 		}
+		slog.Info("disc verified", "drive", d.ID, "disc", disc.ID, "took", time.Since(started).Round(time.Second))
 	}
 
 	if err := st.FinishDisc(bg, disc.ID, note); err != nil {
@@ -367,6 +394,7 @@ func (e *Engine) openDisc(d drive.Drive) (io.ReadCloser, error) {
 		if r, err = e.cfg.Burner.OpenDisc(e.ctx, d); err == nil {
 			return r, nil
 		}
+		slog.Debug("disc not readable yet", "drive", d.ID, "attempt", attempt+1, "of", e.cfg.OpenRetries, "err", err)
 	}
 	return nil, err
 }

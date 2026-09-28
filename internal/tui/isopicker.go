@@ -29,6 +29,7 @@ type isoPicker struct {
 	offset     int
 	showHidden bool
 	selected   map[string]int64 // absolute path → size
+	single     bool             // enter picks the highlighted ISO; nothing is marked
 	err        error
 }
 
@@ -36,6 +37,13 @@ type isoPicker struct {
 func newISOPicker(hint string) isoPicker {
 	p := isoPicker{selected: map[string]int64{}}
 	p.load(startDir(hint), "")
+	return p
+}
+
+// newSingleISOPicker browses for one ISO file, chosen with enter.
+func newSingleISOPicker(hint string) isoPicker {
+	p := newISOPicker(hint)
+	p.single = true
 	return p
 }
 
@@ -159,6 +167,17 @@ func (p isoPicker) update(msg tea.KeyMsg) (next isoPicker, chosen []string, clos
 	case "esc":
 		return p, nil, true
 	case "enter":
+		if p.single {
+			if len(p.entries) == 0 {
+				p.err = errors.New("no ISO files here")
+				return p, nil, false
+			}
+			if e := p.entries[p.cursor]; !e.isDir {
+				return p, []string{p.path(e)}, true
+			}
+			p.load(p.path(p.entries[p.cursor]), "")
+			return p, nil, false
+		}
 		if len(p.selected) == 0 && len(p.entries) > 0 && !p.entries[p.cursor].isDir {
 			e := p.entries[p.cursor]
 			p.selected[p.path(e)] = e.size
@@ -169,7 +188,7 @@ func (p isoPicker) update(msg tea.KeyMsg) (next isoPicker, chosen []string, clos
 		}
 		return p, p.selection(), true
 	case " ", "space":
-		if len(p.entries) > 0 && !p.entries[p.cursor].isDir {
+		if !p.single && len(p.entries) > 0 && !p.entries[p.cursor].isDir {
 			e := p.entries[p.cursor]
 			if _, ok := p.selected[p.path(e)]; ok {
 				delete(p.selected, p.path(e))
@@ -179,9 +198,13 @@ func (p isoPicker) update(msg tea.KeyMsg) (next isoPicker, chosen []string, clos
 			p.moveTo(p.cursor + 1)
 		}
 	case "a", "ctrl+a":
-		p.toggleAll()
+		if !p.single {
+			p.toggleAll()
+		}
 	case "c":
-		p.selected = map[string]int64{}
+		if !p.single {
+			p.selected = map[string]int64{}
+		}
 	case "up", "k":
 		p.moveTo(p.cursor - 1)
 	case "down", "j":
@@ -215,7 +238,11 @@ func (p isoPicker) update(msg tea.KeyMsg) (next isoPicker, chosen []string, clos
 
 func (p isoPicker) view() string {
 	var b strings.Builder
-	b.WriteString(labelStyle.Render("Choose ISO files to burn") + "\n")
+	title := "Choose ISO files to burn"
+	if p.single {
+		title = "Choose an ISO file"
+	}
+	b.WriteString(labelStyle.Render(title) + "\n")
 	b.WriteString(okStyle.Render(p.dir) + "\n\n")
 	if len(p.entries) == 0 {
 		b.WriteString(dimStyle.Render("  (no subfolders or ISO files)") + "\n")
@@ -226,6 +253,8 @@ func (p isoPicker) view() string {
 		var line string
 		if e.isDir {
 			line = "    📁 " + e.name + string(filepath.Separator)
+		} else if p.single {
+			line = fmt.Sprintf("💿 %s  %s", e.name, dimStyle.Render(settings.FormatBytes(e.size)))
 		} else {
 			mark := "[ ]"
 			if _, ok := p.selected[p.path(e)]; ok {
@@ -242,6 +271,12 @@ func (p isoPicker) view() string {
 	if len(p.entries) > pickerRows {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("  Showing %d–%d of %d entries", p.offset+1, end, len(p.entries))) + "\n")
 	}
+	if p.single {
+		if p.err != nil {
+			b.WriteString("\n" + errorStyle.Render("✗ "+p.err.Error()) + "\n")
+		}
+		return b.String()
+	}
 	summary := fmt.Sprintf("%d ISO file(s) selected · %s", len(p.selected), settings.FormatBytes(p.selectedSize()))
 	if n := len(p.isosHere()); n > 0 {
 		summary += dimStyle.Render(fmt.Sprintf("  (%d in this folder)", n))
@@ -254,5 +289,8 @@ func (p isoPicker) view() string {
 }
 
 func (p isoPicker) help() string {
+	if p.single {
+		return "↑/↓: move · →: open · ←: parent · .: hidden · enter: use highlighted ISO · esc: back"
+	}
 	return "↑/↓: move · →: open · ←: parent · space: toggle · a: all in folder · c: clear · .: hidden · enter: burn selected"
 }

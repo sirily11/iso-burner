@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync"
 	"testing"
 	"time"
@@ -192,5 +193,48 @@ func waitFor(t *testing.T, cond func() bool) {
 			t.Fatal("timed out")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestSearchItems(t *testing.T) {
+	var gotQuery url.Values
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/items" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		gotQuery, gotAuth = r.URL.Query(), r.Header.Get("Authorization")
+		w.Write([]byte(`{"data":[{"id":"i1","title":"Photos","category":{"id":"c","name":"Media"},"location":null}],"pagination":{}}`))
+	}))
+	defer srv.Close()
+
+	items, err := NewClient(srv.URL, staticToken("tok")).SearchItems(context.Background(), " photo ", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery.Get("search") != "photo" || gotQuery.Get("limit") != "5" || gotAuth != "Bearer tok" {
+		t.Errorf("query = %v, auth = %q", gotQuery, gotAuth)
+	}
+	if len(items) != 1 || items[0].ID != "i1" || items[0].Title != "Photos" ||
+		items[0].Category == nil || items[0].Category.Name != "Media" || items[0].Location != nil {
+		t.Errorf("items = %+v", items)
+	}
+
+	if _, err := NewClient(srv.URL, staticToken("tok")).SearchItems(context.Background(), "", 5); err != nil {
+		t.Fatal(err)
+	}
+	if gotQuery.Has("search") {
+		t.Errorf("an empty query should not filter, got %v", gotQuery)
+	}
+}
+
+func TestSearchItemsUnauthorized(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	if _, err := NewClient(srv.URL, staticToken("tok")).SearchItems(context.Background(), "x", 5); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
 	}
 }

@@ -17,6 +17,8 @@ const (
 	ModeGenerate
 	// ModeBurn writes existing ISO files to disc.
 	ModeBurn
+	// ModeUpload uploads files as content of an rxstorage item.
+	ModeUpload
 )
 
 // modeChoice is one entry on the mode selection screen.
@@ -29,6 +31,7 @@ type modeChoice struct {
 var modeChoices = []modeChoice{
 	{ModeGenerate, "Generate ISO file", "Split a folder into size-limited ISO images"},
 	{ModeBurn, "Burn ISO", "Write ISO images to a disc drive"},
+	{ModeUpload, "Upload content to item", "Upload files as content of an rxstorage item"},
 }
 
 // updateMode handles keys on the mode selection screen.
@@ -41,7 +44,7 @@ func (m Model) updateMode(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.modeIdx = (m.modeIdx + len(modeChoices) - 1) % len(modeChoices)
 	case "down", "j", "tab":
 		m.modeIdx = (m.modeIdx + 1) % len(modeChoices)
-	case "1", "2":
+	case "1", "2", "3":
 		m.modeIdx = int(key.Runes[0] - '1')
 		return m.chooseMode()
 	case "enter":
@@ -55,7 +58,12 @@ func (m Model) updateMode(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 // chooseMode commits the highlighted mode. Generating continues into the
 // settings wizard; burning opens the ISO picker.
 func (m Model) chooseMode() (tea.Model, tea.Cmd) {
-	m.mode = modeChoices[m.modeIdx].mode
+	m.modeErr = nil
+	choice := modeChoices[m.modeIdx].mode
+	if choice == ModeUpload {
+		return m.chooseUpload()
+	}
+	m.mode = choice
 	m.modeChosen = true
 	if m.mode == ModeBurn {
 		return m.startBurn()
@@ -74,6 +82,9 @@ func (m Model) modeView() string {
 			b.WriteString("  " + line + "\n")
 		}
 		b.WriteString("     " + dimStyle.Render(c.desc) + "\n")
+	}
+	if m.modeErr != nil {
+		b.WriteString("\n" + errorStyle.Render("✗ "+m.modeErr.Error()) + "\n")
 	}
 	return b.String()
 }

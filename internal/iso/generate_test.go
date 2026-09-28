@@ -3,9 +3,11 @@ package iso
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	diskfs "github.com/diskfs/go-diskfs"
@@ -70,6 +72,9 @@ func TestGenerateWritesMountableSizedImagesWithSplitParts(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		if label := strings.TrimRight(fs.Label(), " \x00"); label != fmt.Sprintf("backup_%d", i+1) {
+			t.Fatalf("%s has disc name %q", chunk.Name, label)
+		}
 		for _, piece := range chunk.Pieces {
 			f, err := fs.OpenFile(piece.Name(), os.O_RDONLY)
 			if err != nil {
@@ -120,5 +125,22 @@ func TestGenerateCancelledPublishesNothing(t *testing.T) {
 	entries, _ := os.ReadDir(output)
 	if len(entries) != 0 {
 		t.Fatalf("output should be empty, got %d entries", len(entries))
+	}
+}
+
+func TestVolumeLabel(t *testing.T) {
+	for name, want := range map[string]string{
+		"backup_1.iso":                   "backup_1",
+		"My Photos 2024_3.iso":           "My_Photos_2024_3",
+		"照片_2.iso":                       "2",
+		"照片.iso":                         "",
+		strings.Repeat("a", 40) + ".iso": strings.Repeat("a", 32),
+	} {
+		if got := strings.TrimRight(VolumeLabel(name), " "); got != want {
+			t.Errorf("VolumeLabel(%q) = %q, want %q", name, got, want)
+		}
+		if got := VolumeLabel(name); got != "" && len(got) != maxVolumeLabel {
+			t.Errorf("VolumeLabel(%q) is %d bytes, want %d", name, len(got), maxVolumeLabel)
+		}
 	}
 }

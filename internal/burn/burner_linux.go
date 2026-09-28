@@ -26,6 +26,8 @@ func (linuxBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int
 			opts.Progress(n)
 		} else if speed, ok := parseGrowisofsSpeed(line); ok {
 			opts.SpeedUsed(speed)
+		} else if stage, ok := parseGrowisofsStage(line); ok {
+			opts.Stage(stage)
 		}
 	})
 }
