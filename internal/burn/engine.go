@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -163,6 +164,7 @@ func (e *Engine) update(i int, fn func(*DriveStatus)) {
 
 // fail records a fatal error and stops every drive.
 func (e *Engine) fail(err error) {
+	slog.Error("burn session failed", "session", e.cfg.Session, "err", err)
 	e.mu.Lock()
 	if e.err == nil {
 		e.err = err
@@ -262,6 +264,7 @@ func (e *Engine) run(i int) {
 				e.fail(err)
 				return
 			}
+			slog.Error("disc failed", "drive", d.ID, "disc", disc.ID, "iso", disc.ISOPath, "attempt", disc.Attempts, "err", err)
 			e.update(i, func(s *DriveStatus) { s.Err = err.Error() })
 			e.cfg.Burner.Eject(bg, d)
 		}
@@ -307,6 +310,7 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 		// The burn itself succeeded; say the check was skipped rather
 		// than throwing the disc away.
 		note = "not verified: " + err.Error()
+		slog.Warn("disc not verified", "drive", d.ID, "disc", disc.ID, "err", err)
 	} else {
 		err = Verify(e.ctx, disc.ISOPath, r, e.progress(i, disc.ID))
 		r.Close()

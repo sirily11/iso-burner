@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -84,7 +85,8 @@ func Verify(ctx context.Context, isoPath string, disc io.Reader, progress func(c
 
 // runLines runs cmd and calls line for every line it prints on stdout or
 // stderr, splitting on carriage returns too since burn tools redraw progress
-// in place. A failure includes the last lines of output.
+// in place. A failure includes the last lines of output, and more of them go
+// to the debug log.
 func runLines(cmd *exec.Cmd, line func(string)) error {
 	out, err := cmd.StdoutPipe()
 	if err != nil {
@@ -103,14 +105,15 @@ func runLines(cmd *exec.Cmd, line func(string)) error {
 			continue
 		}
 		tail = append(tail, l)
-		if len(tail) > 3 {
+		if len(tail) > 50 {
 			tail = tail[1:]
 		}
 		line(l)
 	}
 	if err := cmd.Wait(); err != nil {
+		slog.Error("command failed", "cmd", cmd.Path, "err", err, "output", strings.Join(tail, "\n"))
 		if len(tail) > 0 {
-			return fmt.Errorf("%w: %s", err, strings.Join(tail, " · "))
+			return fmt.Errorf("%w: %s", err, strings.Join(tail[max(0, len(tail)-3):], " · "))
 		}
 		return err
 	}
