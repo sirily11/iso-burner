@@ -5,6 +5,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sirily11/iso-burner/internal/auth"
 	"github.com/sirily11/iso-burner/internal/config"
+	"github.com/sirily11/iso-burner/internal/logfile"
 	"github.com/sirily11/iso-burner/internal/recent"
 	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/settings"
@@ -50,6 +52,14 @@ func main() {
 		os.Exit(1)
 	}
 	opts.OutputDir = absOutput
+
+	if path, err := logfile.DefaultPath(); err != nil {
+		fmt.Fprintln(os.Stderr, "debug log:", err)
+	} else if err := logfile.Open(path); err != nil {
+		fmt.Fprintln(os.Stderr, "debug log:", err)
+	} else {
+		slog.Info("started", "args", os.Args[1:])
+	}
 
 	if path, err := recent.DefaultPath(); err != nil {
 		fmt.Fprintln(os.Stderr, "recent selections:", err)
