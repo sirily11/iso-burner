@@ -164,6 +164,9 @@ func (m Model) startBurning() (tea.Model, tea.Cmd) {
 	m.burnSnap = engine.Snapshot()
 	m.burnStarted = time.Now()
 	m.dismissed = map[string]int64{}
+	m.burnSync = m.newReporter(m.burnJobID())
+	m.refreshSyncDiscs(true)
+	m.reportBurn()
 	return m, burnTick()
 }
 
@@ -185,9 +188,13 @@ func (m Model) updateBurning(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.burnSnap = m.engine.Snapshot()
 		m.burnElapsed = time.Since(m.burnStarted)
 		if m.burnSnap.Running {
+			m.refreshSyncDiscs(false)
+			m.reportBurn()
 			return m, burnTick()
 		}
 		m.burnDiscs, _ = m.store.Discs(context.Background(), m.burnSession)
+		m.syncDiscs = m.burnDiscs
+		m.reportBurn()
 		return m, nil
 	case tea.KeyMsg:
 		return m.updateBurningKey(msg)
@@ -203,6 +210,8 @@ func (m Model) updateBurningKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.engine.Stop()
 			m.burnSnap = m.engine.Snapshot()
 			m.burnStopped, m.confirmStop = true, false
+			m.refreshSyncDiscs(true)
+			m.reportBurn()
 			return m, tea.Quit
 		case "n", "esc":
 			m.confirmStop = false
@@ -355,7 +364,11 @@ func (m Model) burnProgressView() string {
 	}
 	overall = fraction(int64(overall*1000), int64(s.Total)*1000)
 	b.WriteString(fmt.Sprintf("%s %3.0f%%  %d of %d disc(s) done\n", bar.ViewAs(overall), overall*100, s.Done, s.Total))
-	b.WriteString(dimStyle.Render(fmt.Sprintf("%s elapsed", m.burnElapsed.Round(time.Second))) + "\n\n")
+	b.WriteString(dimStyle.Render(fmt.Sprintf("%s elapsed", m.burnElapsed.Round(time.Second))) + "\n")
+	if line := m.syncStatusLine(m.burnSync); line != "" {
+		b.WriteString(line + "\n")
+	}
+	b.WriteString("\n")
 
 	nameWidth := 0
 	for _, d := range s.Drives {

@@ -46,6 +46,8 @@ func (m Model) updateMode(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.chooseMode()
 	case "enter":
 		return m.chooseMode()
+	case "a":
+		m.showAccount = true
 	}
 	return m, nil
 }

@@ -7,9 +7,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sirily11/iso-burner/internal/auth"
+	"github.com/sirily11/iso-burner/internal/config"
+	"github.com/sirily11/iso-burner/internal/recent"
+	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/settings"
 	"github.com/sirily11/iso-burner/internal/store"
 	"github.com/sirily11/iso-burner/internal/tui"
@@ -17,13 +22,14 @@ import (
 
 func main() {
 	var opts tui.Options
-	var outputDir, mode, dbPath string
+	var outputDir, mode, dbPath, serverURL string
 	flag.StringVar(&mode, "mode", "", `"generate" or "burn"; asks when empty`)
 	flag.StringVar(&opts.Folder, "folder", "", "source folder to pre-fill; in burn mode, where to browse for ISOs")
 	flag.StringVar(&opts.Pattern, "regex", "", "file-selection regex to pre-fill")
 	flag.StringVar(&opts.ISOName, "name", "", "ISO name to pre-fill")
 	flag.StringVar(&outputDir, "output", ".", "directory for generated ISO files")
 	flag.StringVar(&dbPath, "db", "", "SQLite database that records burn progress (default: in the user config directory)")
+	flag.StringVar(&serverURL, "server", config.RxStorageURL, `rxstorage server that progress is synced to while signed in; "" disables syncing`)
 	flag.Parse()
 	switch mode {
 	case "":
@@ -45,6 +51,17 @@ func main() {
 	}
 	opts.OutputDir = absOutput
 
+	if path, err := recent.DefaultPath(); err != nil {
+		fmt.Fprintln(os.Stderr, "recent selections:", err)
+	} else if opts.Recent, err = recent.Load(path); err != nil {
+		// A damaged file only loses the pre-filled values; it is rewritten
+		// with the next selection.
+		fmt.Fprintln(os.Stderr, "recent selections:", err)
+		opts.RecentPath = path
+	} else {
+		opts.RecentPath = path
+	}
+
 	if opts.Mode != tui.ModeGenerate {
 		if dbPath == "" {
 			if dbPath, err = store.DefaultPath(); err != nil {
@@ -61,6 +78,15 @@ func main() {
 		}
 	}
 
+	if svc, err := auth.New(); err != nil {
+		fmt.Fprintln(os.Stderr, "sign-in:", err)
+	} else {
+		opts.Auth = svc
+		if serverURL != "" {
+			opts.Sync = remote.NewClient(serverURL, svc)
+		}
+	}
+
 	final, err := tea.NewProgram(tui.New(opts)).Run()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -72,6 +98,9 @@ func main() {
 	}
 
 	m := final.(tui.Model)
+	if err := m.CloseSync(5 * time.Second); err != nil {
+		fmt.Fprintln(os.Stderr, "rxstorage sync:", err)
+	}
 	if m.Mode() == tui.ModeBurn {
 		os.Exit(burnSummary(m, dbPath))
 	}

@@ -197,6 +197,11 @@ func (e *Engine) setState(i int, state store.DriveState, disc *store.Disc, messa
 		if disc != nil {
 			c := *disc // the worker keeps changing its own copy
 			s.Disc = &c
+			// Set the total together with the state so a burning drive
+			// is never shown with a 0 B total.
+			if state == store.DriveBurning || state == store.DriveVerifying {
+				s.Total = disc.ISOSize
+			}
 		}
 	})
 	// The drive's state must be saved even while stopping.
@@ -282,7 +287,6 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 	if err := e.setState(i, store.DriveBurning, disc, ""); err != nil {
 		return &fatalError{err}
 	}
-	e.update(i, func(s *DriveStatus) { s.Total = disc.ISOSize })
 	if err := e.cfg.Burner.Burn(e.ctx, d, disc.ISOPath, disc.ISOSize, e.progress(i, disc.ID)); err != nil {
 		return fmt.Errorf("burn: %w", err)
 	}
@@ -294,7 +298,6 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 	if err := e.setState(i, store.DriveVerifying, disc, ""); err != nil {
 		return &fatalError{err}
 	}
-	e.update(i, func(s *DriveStatus) { s.Total = disc.ISOSize })
 	note := ""
 	r, err := e.openDisc(d)
 	if err != nil {

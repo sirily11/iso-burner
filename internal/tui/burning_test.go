@@ -118,8 +118,8 @@ func TestBurningShowsPerDriveProgressAndAsksForDiscs(t *testing.T) {
 	}
 	defer m.engine.Stop()
 
-	m = tickUntil(t, m, "both drives burning", func(m Model) bool {
-		return strings.Count(m.View(), "burning backup_1.iso") == 2
+	m = tickUntil(t, m, "both drives half burned", func(m Model) bool {
+		return strings.Count(m.View(), " 33%  burning backup_1.iso") == 2
 	})
 	view := m.View()
 	for _, want := range []string{"Burning 3 disc(s) with 2 drive(s)", "PIONEER BD-RW BDR-XD07", "ASUS BW-16D1HT", "copy 1 of 3", "copy 2 of 3", " 33%  burning", "Progress is saved in /tmp/burns.db"} {

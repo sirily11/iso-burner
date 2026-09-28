@@ -39,6 +39,15 @@ func newISOPicker(hint string) isoPicker {
 	return p
 }
 
+// preselect marks the given ISO files that still exist.
+func (p *isoPicker) preselect(paths []string) {
+	for _, path := range paths {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && isISO(path) {
+			p.selected[path] = info.Size()
+		}
+	}
+}
+
 func isISO(name string) bool { return strings.EqualFold(filepath.Ext(name), ".iso") }
 
 // load lists the subfolders and ISO files of dir, folders first, and places

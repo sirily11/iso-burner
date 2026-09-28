@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sirily11/iso-burner/internal/iso"
+	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/settings"
 )
 
@@ -37,6 +38,8 @@ func (m Model) startGenerate() (Model, tea.Cmd) {
 	m.generating = true
 	m.genStarted = time.Now()
 	m.genOffset = 0
+	m.genSync = m.newReporter(remote.NewJobID())
+	m.reportGenerate()
 	folder, out, target, chunks, prog := m.result.Folder, m.outputDir, m.result.Preset.Bytes, m.chunks, m.genProgress
 	run := func() tea.Msg {
 		return genDoneMsg{err: iso.Generate(ctx, folder, out, target, chunks, prog)}
@@ -52,12 +55,14 @@ func (m Model) updateGenerate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.genStatuses = m.genProgress.Snapshot()
 		m.genElapsed = time.Since(m.genStarted)
+		m.reportGenerate()
 		return m, genTick()
 	case genDoneMsg:
 		m.generating = false
 		m.genErr = msg.err
 		m.genStatuses = m.genProgress.Snapshot()
 		m.genElapsed = time.Since(m.genStarted)
+		m.reportGenerate()
 		if m.genCancelling {
 			m.cancelled = true
 			return m, tea.Quit
@@ -69,10 +74,12 @@ func (m Model) updateGenerate(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if !m.generating || m.genCancelling {
 				// Finished, or a second ctrl+c while waiting on cancellation.
 				m.cancelled = m.generating
+				m.reportGenerate()
 				return m, tea.Quit
 			}
 			m.genCancelling = true
 			m.genCancel()
+			m.reportGenerate()
 			return m, nil
 		case "enter", "q", "esc":
 			if !m.generating {
@@ -164,7 +171,11 @@ func (m Model) generateView() string {
 		settings.FormatBytes(copied), settings.FormatBytes(total)))
 	b.WriteString(dimStyle.Render(fmt.Sprintf("%d done · %d active · %d queued · %d failed · %s elapsed",
 		counts[iso.StageDone], counts[iso.StageCopying]+counts[iso.StageFinalizing],
-		counts[iso.StageQueued], counts[iso.StageFailed], m.genElapsed.Round(time.Second))) + "\n\n")
+		counts[iso.StageQueued], counts[iso.StageFailed], m.genElapsed.Round(time.Second))) + "\n")
+	if line := m.syncStatusLine(m.genSync); line != "" {
+		b.WriteString(line + "\n")
+	}
+	b.WriteString("\n")
 
 	nameWidth := 0
 	for _, c := range m.chunks {

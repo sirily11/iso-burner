@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/diskfs/go-diskfs v1.9.1
+	github.com/rxtech-lab/RxAuthGo v0.0.0-20260716045331-83d5ebf2bc35
 	modernc.org/sqlite v1.46.1
 )
 
@@ -40,7 +41,6 @@ require (
 	github.com/pkg/xattr v0.4.12 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/rxtech-lab/RxAuthGo v0.0.0-20260716045331-83d5ebf2bc35 // indirect
 	github.com/sirupsen/logrus v1.9.4-0.20230606125235-dd1b4c2e81af // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect

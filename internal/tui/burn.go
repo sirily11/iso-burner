@@ -13,6 +13,7 @@ import (
 // unfinished session.
 func (m Model) startBurn() (tea.Model, tea.Cmd) {
 	m.isoPicker = newISOPicker(m.isoHint)
+	m.isoPicker.preselect(m.recent.ISOs)
 	m.burnISOs, m.burnDrives = nil, nil
 	m.burnJobs, m.settingReplicas = nil, false
 	m.resuming, m.burnErr = nil, nil
@@ -50,6 +51,9 @@ func (m Model) updateBurn(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if chosen != nil {
+		m.isoHint = m.isoPicker.dir
+		m.recent.ISODir, m.recent.ISOs = m.isoPicker.dir, chosen
+		m.saveRecent()
 		m.replicas = newReplicaEditor(chosen, m.isoPicker.selected, m.replicaCounts)
 		m.settingReplicas = true
 		return m, nil
