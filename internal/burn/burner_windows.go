@@ -11,6 +11,7 @@ import (
 	"unicode/utf16"
 
 	"github.com/sirily11/iso-burner/internal/drive"
+	"github.com/sirily11/iso-burner/internal/winps"
 )
 
 // System returns the burner for this operating system: the IMAPI2 COM API,
@@ -117,7 +118,7 @@ func powershell(ctx context.Context, script string, env ...string) *exec.Cmd {
 	for i, u := range units {
 		binary.LittleEndian.PutUint16(raw[2*i:], u)
 	}
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+	cmd := exec.CommandContext(ctx, winps.Path(), "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
 		"-EncodedCommand", base64.StdEncoding.EncodeToString(raw))
 	cmd.Env = append(os.Environ(), env...)
 	return cmd

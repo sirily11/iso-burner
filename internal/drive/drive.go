@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+
+	"github.com/sirily11/iso-burner/internal/winps"
 )
 
 // Drive is one optical disc drive.
@@ -48,7 +50,7 @@ func List(ctx context.Context) ([]Drive, error) {
 		}
 		return parseDrutil(string(out))
 	case "windows":
-		out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command",
+		out, err := exec.CommandContext(ctx, winps.Path(), "-NoProfile", "-NonInteractive", "-Command",
 			"ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_CDROMDrive | "+
 				"Select-Object Drive,Caption,Manufacturer,MediaLoaded)").Output()
 		if err != nil {
