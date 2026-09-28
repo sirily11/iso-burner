@@ -48,6 +48,8 @@ func (darwinBurner) Burn(ctx context.Context, d drive.Drive, iso string, size in
 	return runLines(cmd, func(line string) {
 		if pct, ok := parsePuppetPercent(line); ok {
 			opts.Progress(int64(pct / 100 * float64(size)))
+		} else if msg, ok := parsePuppetMessage(line); ok {
+			opts.Stage(msg)
 		}
 	})
 }

@@ -121,7 +121,7 @@ func (m Model) updateAccount(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	switch key.String() {
 	case "esc", "q":
-		m.showAccount, m.authErr = false, nil
+		m.showAccount, m.authErr, m.uploadAfterSignIn = false, nil, false
 	case "enter":
 		if m.auth == nil || m.authChecking {
 			return m, nil
@@ -176,6 +176,9 @@ func (m Model) accountView() string {
 		b.WriteString("\n" + selectedStyle.Render("› Sign out") + "\n")
 	default:
 		b.WriteString(labelStyle.Render("Not signed in") + "\n\n")
+		if m.uploadAfterSignIn {
+			b.WriteString("Uploading content needs your rxstorage account.\n")
+		}
 		b.WriteString("Sign in with your RxLab account through the browser.\n")
 		b.WriteString("\n" + selectedStyle.Render("› Sign in with RxAuth") + "\n")
 	}

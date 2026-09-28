@@ -100,6 +100,11 @@ type Model struct {
 	mode       Mode
 	modeIdx    int
 	modeChosen bool // mode was picked on the selection screen, so esc returns there
+	modeErr    error
+
+	uploadAfterSignIn bool // upload was chosen while signed out; start it once signed in
+	itemSearch        itemSearch
+	uploadFiles       uploadFiles
 
 	auth           auth.Service
 	user           *auth.User // nil when signed out
@@ -287,6 +292,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if next, ok := m.updateAuthMsg(msg); ok {
+		if next.uploadAfterSignIn && next.user != nil {
+			next.uploadAfterSignIn, next.showAccount = false, false
+			return next.startUpload()
+		}
 		return next, nil
 	}
 	if m.mode == ModeNone {
@@ -300,6 +309,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == ModeBurn {
 		return m.updateBurn(msg)
+	}
+	if m.mode == ModeUpload {
+		return m.updateUpload(msg)
 	}
 	if m.step == stepGenerate {
 		return m.updateGenerate(msg)
@@ -523,6 +535,9 @@ func (m Model) View() string {
 	if m.mode == ModeBurn {
 		return m.burnView()
 	}
+	if m.mode == ModeUpload {
+		return m.uploadView()
+	}
 
 	var b strings.Builder
 	if m.mode == ModeNone {
@@ -532,7 +547,7 @@ func (m Model) View() string {
 		b.WriteString(titleStyle.Render("ISO Burner") + "\n")
 		b.WriteString(m.accountSummary() + "\n\n")
 		b.WriteString(m.modeView())
-		b.WriteString("\n" + dimStyle.Render("↑/↓: choose · 1/2 or enter: select · a: account · esc: quit"))
+		b.WriteString("\n" + dimStyle.Render("↑/↓: choose · 1-3 or enter: select · a: account · esc: quit"))
 		return panelStyle.Render(b.String()) + "\n"
 	}
 	title := "ISO Burner · Settings"

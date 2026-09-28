@@ -71,6 +71,18 @@ func TestParsers(t *testing.T) {
 	if s, ok := parseWindowsSpeed("SPEED 4x (drive supports 2x, 4x, 6x)"); !ok || s != "4x (drive supports 2x, 4x, 6x)" {
 		t.Errorf("windows speed = %q %v", s, ok)
 	}
+	if s, ok := parseWindowsStage("STAGE disc closed"); !ok || s != "disc closed" {
+		t.Errorf("windows stage = %q %v", s, ok)
+	}
+	if s, ok := parseGrowisofsStage("/dev/sr0: closing track"); !ok || s != "closing track" {
+		t.Errorf("growisofs stage = %q %v", s, ok)
+	}
+	if _, ok := parseGrowisofsStage("/dev/sr0: Current Write Speed is 4.1x1352KBps."); ok {
+		t.Error("speed is not a stage")
+	}
+	if s, ok := parsePuppetMessage("MESSAGE:Closing session"); !ok || s != "Closing session" {
+		t.Errorf("puppet message = %q %v", s, ok)
+	}
 	if _, ok := parseWindowsSpeed("PROGRESS 1"); ok {
 		t.Error("progress is not a speed")
 	}
@@ -96,6 +108,9 @@ type fakeBurner struct {
 	discs   map[string][]byte
 	corrupt map[string]int // drive → number of burns to corrupt
 	block   chan struct{}  // when set, burns wait on it or ctx
+	// closing, when set, holds a burn after every byte is sent, the way a
+	// drive still writes its buffer and closes the disc.
+	closing chan struct{}
 	burns   int
 	ejects  int
 	speeds  []Speed
@@ -121,6 +136,10 @@ func (f *fakeBurner) Burn(ctx context.Context, d drive.Drive, iso string, size i
 	progress(size / 2)
 	opts.SpeedUsed(opts.Speed.String())
 	progress(size)
+	if f.closing != nil {
+		<-f.closing
+		opts.Stage("disc closed")
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.burns++
@@ -278,6 +297,28 @@ func TestEngineNotesUnreadableDisc(t *testing.T) {
 	discs, _ := st.Discs(context.Background(), id)
 	if discs[0].Status != store.DiscDone || !strings.Contains(discs[0].VerifyNote, "permission denied") {
 		t.Fatalf("disc = %+v", discs[0])
+	}
+}
+
+func TestEngineShowsClosingThenVerifying(t *testing.T) {
+	drives := testDrives[:1]
+	st, id, _ := newSession(t, 1, drives)
+	fake := newFake()
+	fake.closing = make(chan struct{})
+	e, err := Start(Config{Store: st, Session: id, Drives: drives, Burner: fake, DiscsLoaded: true, OpenRetries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every byte is sent but the burn has not returned: the drive says it
+	// is closing the disc rather than sitting at 100%.
+	s := waitFor(t, e, "closing stage", func(s Snapshot) bool { return s.Drives[0].Stage != "" })
+	if d := s.Drives[0]; d.State != store.DriveBurning || d.Stage != "closing the disc" || d.Progress != d.Total {
+		t.Fatalf("while closing = %+v", d)
+	}
+	close(fake.closing)
+	<-e.Done()
+	if d := e.Snapshot().Drives[0]; d.State != store.DriveFinished || d.Stage != "" || d.Last == nil || d.Last.VerifyNote != "" {
+		t.Fatalf("after verifying = %+v", d)
 	}
 }
 

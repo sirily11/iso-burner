@@ -382,11 +382,16 @@ func (m Model) burnProgressView() string {
 		switch d.State {
 		case store.DriveBurning:
 			state = fmt.Sprintf("burning %s · %s / %s", discLabel(d.Disc), settings.FormatBytes(d.Progress), settings.FormatBytes(d.Total))
-			if d.Speed != "" {
+			if d.Stage != "" {
+				state += " · " + truncate(d.Stage, 50)
+			} else if d.Speed != "" {
 				state += " · " + truncate(d.Speed, 50)
 			}
 		case store.DriveVerifying:
 			state = fmt.Sprintf("checking %s · %s / %s", discLabel(d.Disc), settings.FormatBytes(d.Progress), settings.FormatBytes(d.Total))
+			if d.Stage != "" {
+				state += " · " + truncate(d.Stage, 50)
+			}
 		case store.DriveWaiting:
 			pct, state = 0, selectedStyle.Render("⏏ insert a blank disc for "+discLabel(d.Disc)+" · press enter")
 		case store.DriveFinished:

@@ -34,6 +34,26 @@ func parseGrowisofs(line string) (int64, bool) {
 	return n, err == nil
 }
 
+// parsePuppetMessage reads a `hdiutil -puppetstrings` status line such as
+// "MESSAGE:Closing session…".
+func parsePuppetMessage(line string) (string, bool) {
+	v, ok := strings.CutPrefix(line, "MESSAGE:")
+	v = strings.TrimSpace(v)
+	return v, ok && v != ""
+}
+
+var growisofsStage = regexp.MustCompile(`^\S+: ((?:flushing cache|closing (?:track|session|disc)|reloading tray|writing lead-out).*)$`)
+
+// parseGrowisofsStage reads what growisofs does once the data is written,
+// from lines such as "/dev/sr0: closing track".
+func parseGrowisofsStage(line string) (string, bool) {
+	m := growisofsStage.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	return m[1], true
+}
+
 var growisofsSpeed = regexp.MustCompile(`Current Write Speed is ([\d.]+)x`)
 
 // parseGrowisofsSpeed reads the speed growisofs settles on from a line such
@@ -50,6 +70,13 @@ func parseGrowisofsSpeed(line string) (string, bool) {
 // PowerShell burn script.
 func parseWindowsSpeed(line string) (string, bool) {
 	v, ok := strings.CutPrefix(line, "SPEED ")
+	return strings.TrimSpace(v), ok
+}
+
+// parseWindowsStage reads a "STAGE <description>" line printed by the
+// PowerShell burn script.
+func parseWindowsStage(line string) (string, bool) {
+	v, ok := strings.CutPrefix(line, "STAGE ")
 	return strings.TrimSpace(v), ok
 }
 

@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -104,10 +105,6 @@ func NewClient(baseURL string, tokens TokenSource) *Client {
 
 // PutJob creates or replaces job id on the server.
 func (c *Client) PutJob(ctx context.Context, id string, job Job) error {
-	token, err := c.Tokens.AccessToken(ctx)
-	if err != nil {
-		return fmt.Errorf("sign-in: %w", err)
-	}
 	if job.Tasks == nil {
 		job.Tasks = []Task{}
 	}
@@ -115,37 +112,84 @@ func (c *Client) PutJob(ctx context.Context, id string, job Job) error {
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut,
-		c.BaseURL+"/api/v1/iso-jobs/"+url.PathEscape(id), bytes.NewReader(body))
-	if err != nil {
-		return err
+	_, err = c.do(ctx, http.MethodPut, "/api/v1/iso-jobs/"+url.PathEscape(id), body, "job", id)
+	return err
+}
+
+// Item is an rxstorage item that content can be uploaded to.
+type Item struct {
+	ID       string `json:"id"`
+	Title    string `json:"title"`
+	Category *struct {
+		Name string `json:"name"`
+	} `json:"category"`
+	Location *struct {
+		Title string `json:"title"`
+	} `json:"location"`
+}
+
+// SearchItems returns up to limit of the signed-in user's items whose title
+// matches query; an empty query lists the most recent items.
+func (c *Client) SearchItems(ctx context.Context, query string, limit int) ([]Item, error) {
+	q := url.Values{"limit": {strconv.Itoa(limit)}}
+	if query = strings.TrimSpace(query); query != "" {
+		q.Set("search", query)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	data, err := c.do(ctx, http.MethodGet, "/api/v1/items?"+q.Encode(), nil, "search", query)
+	if err != nil {
+		return nil, err
+	}
+	var page struct {
+		Data []Item `json:"data"`
+	}
+	if err := json.Unmarshal(data, &page); err != nil {
+		return nil, fmt.Errorf("rxstorage: reading items: %w", err)
+	}
+	return page.Data, nil
+}
+
+// do sends an authorized request and returns the body of a 2xx response.
+// logArgs are added to the log line of a failed request.
+func (c *Client) do(ctx context.Context, method, path string, body []byte, logArgs ...any) ([]byte, error) {
+	token, err := c.Tokens.AccessToken(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("sign-in: %w", err)
+	}
+	var r io.Reader
+	if body != nil {
+		r = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, r)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
-	var data []byte
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		data, _ = io.ReadAll(io.LimitReader(resp.Body, 4096))
-		slog.Error("rxstorage request failed", "method", req.Method, "url", req.URL.String(),
-			"job", id, "status", resp.StatusCode, "body", string(data))
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode/100 != 2 {
+		slog.Error("rxstorage request failed", append([]any{"method", req.Method, "url", req.URL.String()},
+			append(logArgs, "status", resp.StatusCode, "body", string(data[:min(len(data), 4096)]))...)...)
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
-		return ErrUnauthorized
+		return nil, ErrUnauthorized
 	}
 	if resp.StatusCode/100 != 2 {
 		var e struct {
 			Error string `json:"error"`
 		}
 		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			return fmt.Errorf("rxstorage: %s (HTTP %d)", e.Error, resp.StatusCode)
+			return nil, fmt.Errorf("rxstorage: %s (HTTP %d)", e.Error, resp.StatusCode)
 		}
-		return fmt.Errorf("rxstorage: HTTP %d", resp.StatusCode)
+		return nil, fmt.Errorf("rxstorage: HTTP %d", resp.StatusCode)
 	}
-	return nil
+	return data, err
 }
 
 // NewJobID returns a random ID for a job that is never resumed.

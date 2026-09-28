@@ -43,6 +43,9 @@ type BurnOptions struct {
 	// SpeedUsed is called with the write speed the drive actually uses,
 	// e.g. "4x", when the burner can tell.
 	SpeedUsed func(speed string)
+	// Stage is called with what the burner is doing when progress alone
+	// does not say, e.g. closing the disc after every byte was sent.
+	Stage func(stage string)
 }
 
 // Burner talks to the operating system's disc burning tools.
