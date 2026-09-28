@@ -38,6 +38,9 @@ if (-not $recorder) { throw "no disc recorder at $letter" }
 // prints "PROGRESS <bytes>" as IMAPI2 reads the image, since IMAPI2's own
 // progress events cannot reach a blocked PowerShell pipeline.
 const burnScript = `
+# Progress records (such as Add-Type's) would be written to stderr as CLIXML
+# and bury the real error message.
+$ProgressPreference = 'SilentlyContinue'
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;
@@ -88,8 +91,21 @@ try {
 ` + findRecorder + `
 	$format = New-Object -ComObject IMAPI2.MsftDiscFormat2Data
 	if (-not $format.IsRecorderSupported($recorder)) { throw "drive $letter cannot burn data discs" }
-	if (-not $format.IsCurrentMediaSupported($recorder)) { throw "no writable disc in $letter" }
 	$format.Recorder = $recorder
+	# A freshly inserted disc takes a while to spin up, and until then IMAPI2
+	# reports it as unsupported, so give the drive time to become ready.
+	$deadline = (Get-Date).AddSeconds(60)
+	while (-not $format.IsCurrentMediaSupported($recorder)) {
+		if ((Get-Date) -gt $deadline) {
+			$types = @('unknown media', 'CD-ROM', 'CD-R', 'CD-RW', 'DVD-ROM', 'DVD-RAM', 'DVD+R', 'DVD+RW',
+				'DVD+R DL', 'DVD-R', 'DVD-RW', 'DVD-R DL', 'disk', 'DVD+RW DL', 'HD DVD-ROM', 'HD DVD-R',
+				'HD DVD-RAM', 'BD-ROM', 'BD-R', 'BD-RE')
+			try { $type = $types[[int]$format.CurrentPhysicalMediaType] } catch { $type = $null }
+			if (-not $type) { throw "no disc in $letter, or the drive is not ready" }
+			throw "the $type disc in $letter cannot be written (it may be finalized, read-only or unsupported)"
+		}
+		Start-Sleep -Seconds 2
+	}
 	if (-not $format.MediaHeuristicallyBlank) { throw "the disc in $letter is not blank" }
 	$format.ClientName = 'iso-burner'
 	$format.ForceMediaToBeClosed = $true
