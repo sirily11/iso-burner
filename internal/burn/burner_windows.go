@@ -20,10 +20,18 @@ func System() Burner { return windowsBurner{} }
 
 type windowsBurner struct{}
 
+// prologue makes PowerShell stop on the first error and print UTF-8, so
+// messages in a non-English Windows locale reach Go intact rather than in the
+// console code page (e.g. GBK).
+const prologue = `
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+`
+
 // findRecorder is PowerShell that sets $recorder to the IMAPI2 recorder
 // mounted at the drive letter in $env:ISO_BURNER_DRIVE.
 const findRecorder = `
-$ErrorActionPreference = 'Stop'
 $letter = $env:ISO_BURNER_DRIVE.TrimEnd('\').TrimEnd(':') + ':\'
 $recorder = $null
 foreach ($id in (New-Object -ComObject IMAPI2.MsftDiscMaster2)) {
@@ -34,21 +42,21 @@ foreach ($id in (New-Object -ComObject IMAPI2.MsftDiscMaster2)) {
 if (-not $recorder) { throw "no disc recorder at $letter" }
 `
 
-// burnScript writes $env:ISO_BURNER_ISO to the disc through a stream that
-// prints "PROGRESS <bytes>" as IMAPI2 reads the image, since IMAPI2's own
-// progress events cannot reach a blocked PowerShell pipeline.
-const burnScript = `
-# Progress records (such as Add-Type's) would be written to stderr as CLIXML
-# and bury the real error message.
-$ProgressPreference = 'SilentlyContinue'
+// streamType is PowerShell that defines IsoBurnerStream, the stream IMAPI2
+// reads the image through; it prints "PROGRESS <bytes>" as it goes, since
+// IMAPI2's own progress events cannot reach a blocked PowerShell pipeline.
+// ComTypes is aliased because .NET Framework also has an obsolete
+// System.Runtime.InteropServices.STATSTG, which makes a bare STATSTG
+// ambiguous.
+const streamType = `
 Add-Type -TypeDefinition @'
 using System;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
+using ComTypes = System.Runtime.InteropServices.ComTypes;
 
 [ComVisible(true)]
-public class IsoBurnerStream : IStream {
+public class IsoBurnerStream : ComTypes.IStream {
 	private FileStream file;
 	private long reported = -1;
 	public IsoBurnerStream(string path) { file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20); }
@@ -71,24 +79,29 @@ public class IsoBurnerStream : IStream {
 		long pos = file.Seek(dlibMove, (SeekOrigin)dwOrigin);
 		if (plibNewPosition != IntPtr.Zero) Marshal.WriteInt64(plibNewPosition, pos);
 	}
-	public void Stat(out STATSTG pstatstg, int grfStatFlag) {
-		pstatstg = new STATSTG();
+	public void Stat(out ComTypes.STATSTG pstatstg, int grfStatFlag) {
+		pstatstg = new ComTypes.STATSTG();
 		pstatstg.type = 2;
 		pstatstg.cbSize = file.Length;
 	}
 	public void Write(byte[] pv, int cb, IntPtr pcbWritten) { throw new NotSupportedException(); }
 	public void SetSize(long libNewSize) { throw new NotSupportedException(); }
-	public void CopyTo(IStream pstm, long cb, IntPtr pcbRead, IntPtr pcbWritten) { throw new NotSupportedException(); }
+	public void CopyTo(ComTypes.IStream pstm, long cb, IntPtr pcbRead, IntPtr pcbWritten) { throw new NotSupportedException(); }
 	public void Commit(int grfCommitFlags) { }
 	public void Revert() { throw new NotSupportedException(); }
 	public void LockRegion(long libOffset, long cb, int dwLockType) { throw new NotSupportedException(); }
 	public void UnlockRegion(long libOffset, long cb, int dwLockType) { throw new NotSupportedException(); }
-	public void Clone(out IStream ppstm) { throw new NotSupportedException(); }
+	public void Clone(out ComTypes.IStream ppstm) { throw new NotSupportedException(); }
 	public void Close() { file.Dispose(); }
 }
 '@
+`
+
+// burnScript writes $env:ISO_BURNER_ISO to the disc. Add-Type runs inside
+// the try so a compile error is printed as one plain line, not as CLIXML.
+const burnScript = prologue + `
 try {
-` + findRecorder + `
+` + streamType + findRecorder + `
 	$format = New-Object -ComObject IMAPI2.MsftDiscFormat2Data
 	if (-not $format.IsRecorderSupported($recorder)) { throw "drive $letter cannot burn data discs" }
 	$format.Recorder = $recorder
@@ -117,7 +130,7 @@ try {
 }
 `
 
-const ejectScript = `
+const ejectScript = prologue + `
 try {
 ` + findRecorder + `
 	$recorder.EjectMedia()
