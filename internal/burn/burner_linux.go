@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 
 	"github.com/sirily11/iso-burner/internal/drive"
 )
@@ -14,11 +15,17 @@ func System() Burner { return linuxBurner{} }
 
 type linuxBurner struct{}
 
-func (linuxBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, progress func(int64)) error {
-	cmd := exec.CommandContext(ctx, "growisofs", "-dvd-compat", "-Z", d.ID+"="+iso)
+func (linuxBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, opts BurnOptions) error {
+	args := []string{"-dvd-compat"}
+	if opts.Speed > SpeedMax {
+		args = append(args, "-speed="+strconv.Itoa(int(opts.Speed)))
+	}
+	cmd := exec.CommandContext(ctx, "growisofs", append(args, "-Z", d.ID+"="+iso)...)
 	return runLines(cmd, func(line string) {
 		if n, ok := parseGrowisofs(line); ok {
-			progress(n)
+			opts.Progress(n)
+		} else if speed, ok := parseGrowisofsSpeed(line); ok {
+			opts.SpeedUsed(speed)
 		}
 	})
 }

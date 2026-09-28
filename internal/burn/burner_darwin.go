@@ -33,17 +33,21 @@ func hdiutilDevice(ctx context.Context, id string) (string, error) {
 	return devices[i-1], nil
 }
 
-func (darwinBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, progress func(int64)) error {
+func (darwinBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, opts BurnOptions) error {
 	device, err := hdiutilDevice(ctx, d.ID)
 	if err != nil {
 		return err
 	}
 	// Verification is done by reading the disc back afterwards, which needs
 	// the disc to stay in the drive.
-	cmd := exec.CommandContext(ctx, "hdiutil", "burn", iso, "-device", device, "-puppetstrings", "-noverifyburn", "-noeject")
+	args := []string{"burn", iso, "-device", device, "-puppetstrings", "-noverifyburn", "-noeject"}
+	if opts.Speed > SpeedMax {
+		args = append(args, "-speed", strconv.Itoa(int(opts.Speed)))
+	}
+	cmd := exec.CommandContext(ctx, "hdiutil", args...)
 	return runLines(cmd, func(line string) {
 		if pct, ok := parsePuppetPercent(line); ok {
-			progress(int64(pct / 100 * float64(size)))
+			opts.Progress(int64(pct / 100 * float64(size)))
 		}
 	})
 }

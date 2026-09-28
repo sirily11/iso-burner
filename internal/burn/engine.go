@@ -27,6 +27,9 @@ type DriveStatus struct {
 	Err string
 	// Completed counts the discs this drive finished in this run.
 	Completed int
+	// Speed is the write speed of the current burn, when the burner
+	// reports it.
+	Speed string
 }
 
 // Snapshot is a point-in-time view of a whole session.
@@ -47,6 +50,8 @@ type Config struct {
 	Session int64
 	Drives  []drive.Drive
 	Burner  Burner
+	// Speed is the requested write speed for every burn.
+	Speed Speed
 	// DiscsLoaded says blank discs are already in the drives, so the first
 	// burn starts without asking for a disc.
 	DiscsLoaded bool
@@ -195,6 +200,9 @@ func (e *Engine) setState(i int, state store.DriveState, disc *store.Disc, messa
 	}
 	e.update(i, func(s *DriveStatus) {
 		s.State, s.Progress, s.Total = state, 0, 0
+		if state != store.DriveBurning {
+			s.Speed = ""
+		}
 		s.Disc = nil
 		if disc != nil {
 			c := *disc // the worker keeps changing its own copy
@@ -290,7 +298,15 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 	if err := e.setState(i, store.DriveBurning, disc, ""); err != nil {
 		return &fatalError{err}
 	}
-	if err := e.cfg.Burner.Burn(e.ctx, d, disc.ISOPath, disc.ISOSize, e.progress(i, disc.ID)); err != nil {
+	opts := BurnOptions{
+		Speed:    e.cfg.Speed,
+		Progress: e.progress(i, disc.ID),
+		SpeedUsed: func(speed string) {
+			slog.Info("burning", "drive", d.ID, "disc", disc.ID, "requested", e.cfg.Speed.String(), "speed", speed)
+			e.update(i, func(s *DriveStatus) { s.Speed = speed })
+		},
+	}
+	if err := e.cfg.Burner.Burn(e.ctx, d, disc.ISOPath, disc.ISOSize, opts); err != nil {
 		return fmt.Errorf("burn: %w", err)
 	}
 

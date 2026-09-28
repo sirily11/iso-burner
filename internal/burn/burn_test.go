@@ -65,6 +65,18 @@ func TestParsers(t *testing.T) {
 	if n, ok := parseWindowsProgress("PROGRESS 8388608"); !ok || n != 8388608 {
 		t.Errorf("windows = %v %v", n, ok)
 	}
+	if s, ok := parseGrowisofsSpeed("/dev/sr0: Current Write Speed is 4.1x1352KBps."); !ok || s != "4.1x" {
+		t.Errorf("growisofs speed = %q %v", s, ok)
+	}
+	if s, ok := parseWindowsSpeed("SPEED 4x (drive supports 2x, 4x, 6x)"); !ok || s != "4x (drive supports 2x, 4x, 6x)" {
+		t.Errorf("windows speed = %q %v", s, ok)
+	}
+	if _, ok := parseWindowsSpeed("PROGRESS 1"); ok {
+		t.Error("progress is not a speed")
+	}
+	if SpeedMax.String() != "Max" || Speed(4).String() != "4x" {
+		t.Errorf("speed names = %s %s", SpeedMax, Speed(4))
+	}
 	status := " Vendor   Product           Rev\n PIONEER  BD-RW   BDR-XD07  1.00\n\n           Type: BD-R                 Name: /dev/disk4\n"
 	if node, ok := parseDrutilDevNode(status); !ok || node != "/dev/disk4" {
 		t.Errorf("drutil status = %q %v", node, ok)
@@ -86,13 +98,15 @@ type fakeBurner struct {
 	block   chan struct{}  // when set, burns wait on it or ctx
 	burns   int
 	ejects  int
+	speeds  []Speed
 }
 
 func newFake() *fakeBurner {
 	return &fakeBurner{discs: map[string][]byte{}, corrupt: map[string]int{}}
 }
 
-func (f *fakeBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, progress func(int64)) error {
+func (f *fakeBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, opts BurnOptions) error {
+	progress := opts.Progress
 	if f.block != nil {
 		select {
 		case <-f.block:
@@ -105,10 +119,12 @@ func (f *fakeBurner) Burn(ctx context.Context, d drive.Drive, iso string, size i
 		return err
 	}
 	progress(size / 2)
+	opts.SpeedUsed(opts.Speed.String())
 	progress(size)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.burns++
+	f.speeds = append(f.speeds, opts.Speed)
 	if f.corrupt[d.ID] > 0 {
 		f.corrupt[d.ID]--
 		data = append([]byte(nil), data...)
@@ -181,7 +197,7 @@ func allWaitingOrFinished(s Snapshot) bool {
 func TestEngineBurnsAcrossDrivesAndAsksForDiscs(t *testing.T) {
 	st, id, _ := newSession(t, 3, testDrives)
 	fake := newFake()
-	e, err := Start(Config{Store: st, Session: id, Drives: testDrives, Burner: fake, DiscsLoaded: true, OpenRetries: 1})
+	e, err := Start(Config{Store: st, Session: id, Drives: testDrives, Burner: fake, Speed: 4, DiscsLoaded: true, OpenRetries: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,6 +227,11 @@ func TestEngineBurnsAcrossDrivesAndAsksForDiscs(t *testing.T) {
 	}
 	if fake.burns != 3 || fake.ejects != 3 {
 		t.Fatalf("burns=%d ejects=%d", fake.burns, fake.ejects)
+	}
+	for _, sp := range fake.speeds {
+		if sp != 4 {
+			t.Fatalf("burn speeds = %v, want 4x", fake.speeds)
+		}
 	}
 	if u, _ := st.Unfinished(context.Background()); u != nil {
 		t.Fatal("a completed session should not be resumable")

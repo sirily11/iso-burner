@@ -17,12 +17,39 @@ import (
 	"github.com/sirily11/iso-burner/internal/drive"
 )
 
+// Speed is a requested write speed as a multiple of the disc type's 1x rate,
+// e.g. 4 for 4x. SpeedMax asks for the fastest speed the drive supports.
+type Speed int
+
+const SpeedMax Speed = 0
+
+// Speeds are the write speeds the user can choose from, slowest last.
+var Speeds = []Speed{SpeedMax, 2, 4, 6, 8, 12, 16}
+
+func (s Speed) String() string {
+	if s <= SpeedMax {
+		return "Max"
+	}
+	return fmt.Sprintf("%dx", int(s))
+}
+
+// BurnOptions are how to burn a disc and where to report on it.
+type BurnOptions struct {
+	// Speed is the requested write speed. Drives round it to a speed they
+	// support.
+	Speed Speed
+	// Progress is called with the bytes written so far.
+	Progress func(written int64)
+	// SpeedUsed is called with the write speed the drive actually uses,
+	// e.g. "4x", when the burner can tell.
+	SpeedUsed func(speed string)
+}
+
 // Burner talks to the operating system's disc burning tools.
 type Burner interface {
-	// Burn writes the ISO image at iso (size bytes) to the blank disc in d,
-	// calling progress with the bytes written so far. The disc stays in the
-	// drive afterwards so it can be verified.
-	Burn(ctx context.Context, d drive.Drive, iso string, size int64, progress func(written int64)) error
+	// Burn writes the ISO image at iso (size bytes) to the blank disc in d.
+	// The disc stays in the drive afterwards so it can be verified.
+	Burn(ctx context.Context, d drive.Drive, iso string, size int64, opts BurnOptions) error
 	// OpenDisc opens the raw contents of the disc in d for reading back.
 	OpenDisc(ctx context.Context, d drive.Drive) (io.ReadCloser, error)
 	// Eject ejects the disc in d.

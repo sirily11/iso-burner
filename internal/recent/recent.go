@@ -26,6 +26,9 @@ type Recent struct {
 	ISODir string `json:"iso_dir,omitempty"`
 	// ISOs are the ISO files last chosen for burning.
 	ISOs []string `json:"isos,omitempty"`
+	// Speed is the write speed last chosen for burning, as a multiple of
+	// 1x; 0 means the fastest.
+	Speed int `json:"speed,omitempty"`
 }
 
 // DefaultPath returns where selections are remembered, next to the burn

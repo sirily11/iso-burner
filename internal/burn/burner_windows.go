@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 
@@ -132,6 +133,19 @@ try {
 	}
 	$format.ClientName = 'iso-burner'
 	$format.ForceMediaToBeClosed = $true
+	# IMAPI2 speeds are in sectors per second; 1x depends on the disc type.
+	$perX = 675
+	if ($type -like 'CD*') { $perX = 75 } elseif ($type -like 'BD*') { $perX = 2195 } elseif ($type -like 'HD DVD*') { $perX = 4568 }
+	$speed = [int]$env:ISO_BURNER_SPEED
+	# -1 (0xFFFFFFFF) asks for the fastest speed; the drive rounds any
+	# other request to a speed it supports.
+	$sectors = -1
+	if ($speed -gt 0) { $sectors = $speed * $perX }
+	try { $format.SetWriteSpeed($sectors, $false) } catch { Write-Output "SPEED could not set the write speed: $($_.Exception.Message)" }
+	try {
+		$supported = @($format.SupportedWriteSpeeds | ForEach-Object { '{0:0.#}x' -f ($_ / $perX) }) -join ', '
+		Write-Output ('SPEED {0:0.#}x (drive supports {1})' -f ($format.CurrentWriteSpeed / $perX), $supported)
+	} catch { }
 	$stream = New-Object IsoBurnerStream $env:ISO_BURNER_ISO
 	try { $format.Write($stream) } finally { $stream.Close() }
 } catch {
@@ -163,11 +177,14 @@ func powershell(ctx context.Context, script string, env ...string) *exec.Cmd {
 	return cmd
 }
 
-func (windowsBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, progress func(int64)) error {
-	cmd := powershell(ctx, burnScript, "ISO_BURNER_DRIVE="+d.ID, "ISO_BURNER_ISO="+iso)
+func (windowsBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, opts BurnOptions) error {
+	cmd := powershell(ctx, burnScript, "ISO_BURNER_DRIVE="+d.ID, "ISO_BURNER_ISO="+iso,
+		"ISO_BURNER_SPEED="+strconv.Itoa(int(opts.Speed)))
 	return runLines(cmd, func(line string) {
 		if n, ok := parseWindowsProgress(line); ok {
-			progress(n)
+			opts.Progress(n)
+		} else if speed, ok := parseWindowsSpeed(line); ok {
+			opts.SpeedUsed(speed)
 		}
 	})
 }

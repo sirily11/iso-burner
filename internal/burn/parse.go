@@ -34,6 +34,25 @@ func parseGrowisofs(line string) (int64, bool) {
 	return n, err == nil
 }
 
+var growisofsSpeed = regexp.MustCompile(`Current Write Speed is ([\d.]+)x`)
+
+// parseGrowisofsSpeed reads the speed growisofs settles on from a line such
+// as "/dev/sr0: Current Write Speed is 4.1x1352KBps.".
+func parseGrowisofsSpeed(line string) (string, bool) {
+	m := growisofsSpeed.FindStringSubmatch(line)
+	if m == nil {
+		return "", false
+	}
+	return m[1] + "x", true
+}
+
+// parseWindowsSpeed reads a "SPEED <description>" line printed by the
+// PowerShell burn script.
+func parseWindowsSpeed(line string) (string, bool) {
+	v, ok := strings.CutPrefix(line, "SPEED ")
+	return strings.TrimSpace(v), ok
+}
+
 // parseWindowsProgress reads a "PROGRESS <bytes>" line printed by the
 // PowerShell burn script.
 func parseWindowsProgress(line string) (int64, bool) {

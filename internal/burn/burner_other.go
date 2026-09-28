@@ -18,7 +18,7 @@ type unsupported struct{}
 
 var errUnsupported = fmt.Errorf("burning discs is not supported on %s", runtime.GOOS)
 
-func (unsupported) Burn(context.Context, drive.Drive, string, int64, func(int64)) error {
+func (unsupported) Burn(context.Context, drive.Drive, string, int64, BurnOptions) error {
 	return errUnsupported
 }
 

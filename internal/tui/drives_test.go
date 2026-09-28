@@ -193,11 +193,23 @@ func TestBurnModeSelectsDrivesAfterISOs(t *testing.T) {
 		t.Fatalf("drive ticks should survive going back:\n%s", m.View())
 	}
 
+	if !strings.Contains(m.View(), "Write speed  Max") {
+		t.Fatalf("speed should default to max:\n%s", m.View())
+	}
+	m = send(t, m, key("s"))
+	m = send(t, m, key("s"))
+	if !strings.Contains(m.View(), "Write speed  4x") {
+		t.Fatalf("s should cycle Max → 2x → 4x:\n%s", m.View())
+	}
+
 	m = send(t, m, key(" ")) // untick the first drive
 	next, cmd = m.Update(enter)
 	m = next.(Model)
 	if cmd == nil || m.engine == nil {
 		t.Fatalf("confirming drives should start burning: %v", m.burnErr)
+	}
+	if m.recent.Speed != 4 {
+		t.Fatalf("recent speed = %d, want 4", m.recent.Speed)
 	}
 	m.engine.Stop()
 	if got := ids(m.BurnDrives()); got != "2,3" {

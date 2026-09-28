@@ -14,6 +14,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sirily11/iso-burner/internal/burn"
 	"github.com/sirily11/iso-burner/internal/drive"
 	"github.com/sirily11/iso-burner/internal/store"
 )
@@ -38,7 +39,8 @@ type fakeBurner struct {
 
 func newFakeBurner() *fakeBurner { return &fakeBurner{discs: map[string][]byte{}} }
 
-func (f *fakeBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, progress func(int64)) error {
+func (f *fakeBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, opts burn.BurnOptions) error {
+	progress := opts.Progress
 	progress(size / 2)
 	if f.release != nil {
 		select {
