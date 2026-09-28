@@ -1,5 +1,5 @@
-// Package remote syncs ISO generation and burning progress to the rxstorage
-// server, so it can be followed from the rxstorage web and iOS apps.
+// Package remote syncs ISO generation, burning and upload progress to the
+// rxstorage server, so it can be followed from the rxstorage web and iOS apps.
 package remote
 
 import (
@@ -26,6 +26,7 @@ type Kind string
 const (
 	KindGenerate Kind = "generate"
 	KindBurn     Kind = "burn"
+	KindUpload   Kind = "upload"
 )
 
 // Status is the lifecycle state of a job.
@@ -45,9 +46,13 @@ type Section string
 const (
 	SectionISO   Section = "iso"
 	SectionDrive Section = "drive"
+	SectionFile  Section = "file"
 )
 
-// Task is one progress row: an ISO file or a disc drive.
+// MaxTasks is how many progress rows the server accepts in one job.
+const MaxTasks = 2000
+
+// Task is one progress row: an ISO file, a disc drive or an uploaded file.
 type Task struct {
 	Section    Section `json:"section"`
 	Name       string  `json:"name"`
@@ -87,11 +92,14 @@ type TokenSource interface {
 // fixes it.
 var ErrUnauthorized = errors.New("rxstorage rejected the sign-in; sign in again")
 
-// Client talks to the rxstorage ISO jobs API.
+// Client talks to the rxstorage API.
 type Client struct {
 	BaseURL string
 	Tokens  TokenSource
 	HTTP    *http.Client
+	// Uploads sends files to presigned storage URLs. It has no timeout, as
+	// large files take long to send.
+	Uploads *http.Client
 }
 
 // NewClient returns a client for the rxstorage server at baseURL.
@@ -100,6 +108,7 @@ func NewClient(baseURL string, tokens TokenSource) *Client {
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		Tokens:  tokens,
 		HTTP:    &http.Client{Timeout: 15 * time.Second},
+		Uploads: &http.Client{},
 	}
 }
 

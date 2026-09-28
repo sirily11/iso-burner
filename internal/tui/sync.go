@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/sirily11/iso-burner/internal/iso"
 	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/store"
+	"github.com/sirily11/iso-burner/internal/upload"
 )
 
 // syncing reports whether progress should be sent to rxstorage: a server is
@@ -28,10 +30,10 @@ func (m Model) newReporter(id string) *remote.Reporter {
 	return remote.NewReporter(m.sync, id, m.syncInterval)
 }
 
-// CloseSync delivers the final progress of the generate or burn job, waiting
-// at most timeout. Call it after the program exits.
+// CloseSync delivers the final progress of the generate, burn or upload job,
+// waiting at most timeout. Call it after the program exits.
 func (m Model) CloseSync(timeout time.Duration) error {
-	return errors.Join(m.genSync.Close(timeout), m.burnSync.Close(timeout))
+	return errors.Join(m.genSync.Close(timeout), m.burnSync.Close(timeout), m.uploadFiles.run.sync.Close(timeout))
 }
 
 // syncStatusLine says whether progress is reaching rxstorage.
@@ -288,6 +290,88 @@ func (m Model) burnJob() remote.Job {
 	default:
 		job.Status = remote.StatusStopped
 		job.Message = fmt.Sprintf("Stopped with %d of %d disc(s) done; resume from burn mode", s.Done, s.Total)
+	}
+	job.FinishedAt = finishedAt(job.Status != remote.StatusRunning)
+	return job
+}
+
+// reportUpload sends the current upload progress.
+func (m Model) reportUpload() {
+	if r := m.uploadFiles.run; r.sync != nil {
+		r.sync.Report(m.uploadJob())
+	}
+}
+
+// uploadJob snapshots an upload to an item for rxstorage. Each file's row
+// goes from 0 to 1 over making and uploading its previews, as on screen.
+func (m Model) uploadJob() remote.Job {
+	f, r := m.uploadFiles, m.uploadFiles.run
+	item := m.itemSearch.chosen.Title
+	job := remote.Job{
+		Kind:       remote.KindUpload,
+		Title:      truncate("Upload to "+item, 512),
+		HostName:   m.hostName,
+		StartedAt:  r.started,
+		TotalCount: len(r.statuses),
+		Tasks:      make([]remote.Task, 0, min(len(r.statuses), remote.MaxTasks)),
+	}
+	failed, active := 0, 0
+	var overall float64
+	for i, s := range r.statuses {
+		size := f.matched[i].Size
+		job.TotalBytes += size
+		job.DoneBytes += int64(s.Completion() * float64(size))
+		overall += s.Completion()
+		switch s.Stage {
+		case upload.StageDone:
+			job.DoneCount++
+		case upload.StageFailed:
+			failed++
+		case upload.StageExtracting, upload.StagePreparing, upload.StageUploading:
+			active++
+		}
+	}
+	job.Progress = overall / float64(max(1, len(r.statuses)))
+
+	// Active, failed and queued files come first, so they stay in the job
+	// when there are more files than the server takes.
+	for _, i := range uploadOrder(r.statuses) {
+		if len(job.Tasks) == remote.MaxTasks {
+			break
+		}
+		s, file := r.statuses[i], f.matched[i]
+		t := remote.Task{
+			Section:    remote.SectionFile,
+			Name:       truncate(path.Base(file.RelPath), 512),
+			Status:     s.Label(),
+			Detail:     truncate(file.RelPath, 1024),
+			Progress:   s.Completion(),
+			DoneBytes:  int64(s.Completion() * float64(file.Size)),
+			TotalBytes: file.Size,
+		}
+		if s.Stage == upload.StageFailed {
+			t.DoneBytes = 0
+			if s.Err != nil {
+				t.Error = truncate(s.Err.Error(), 2048)
+			}
+		}
+		job.Tasks = append(job.Tasks, t)
+	}
+
+	switch {
+	case r.running && !r.cancelling:
+		job.Status = remote.StatusRunning
+		job.Message = fmt.Sprintf("%d uploading · %d queued", active, len(r.statuses)-job.DoneCount-failed-active)
+	case r.cancelling || m.cancelled:
+		job.Status, job.Message = remote.StatusCancelled, "Cancelled"
+	case r.err != nil:
+		job.Status, job.Error = remote.StatusFailed, truncate(r.err.Error(), 2048)
+	case failed > 0:
+		job.Status = remote.StatusFailed
+		job.Error = fmt.Sprintf("%d of %d file(s) failed to upload", failed, len(r.statuses))
+	default:
+		job.Status, job.Progress = remote.StatusCompleted, 1
+		job.Message = fmt.Sprintf("Uploaded %d file(s)", len(r.statuses))
 	}
 	job.FinishedAt = finishedAt(job.Status != remote.StatusRunning)
 	return job

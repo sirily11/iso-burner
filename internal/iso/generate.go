@@ -91,6 +91,35 @@ func Generate(ctx context.Context, sourceDir, outputDir string, targetBytes int6
 	return errors.Join(failures...)
 }
 
+// maxVolumeLabel is the length of the ISO 9660 volume identifier.
+const maxVolumeLabel = 32
+
+// VolumeLabel is the disc name for the image called name: the file name
+// without ".iso", e.g. "backup_1" for "backup_1.iso". Without Joliet the
+// label is plain ASCII, so other characters become '_'. An empty result
+// leaves the library default.
+func VolumeLabel(name string) string {
+	name = strings.TrimSuffix(name, filepath.Ext(name))
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_', r == '-':
+			b.WriteRune(r)
+		case !strings.HasSuffix(b.String(), "_"):
+			b.WriteByte('_')
+		}
+	}
+	label := strings.Trim(b.String(), "_")
+	if len(label) > maxVolumeLabel {
+		label = label[:maxVolumeLabel]
+	}
+	if label == "" {
+		return ""
+	}
+	// The field is space padded; go-diskfs would pad it with NULs.
+	return label + strings.Repeat(" ", maxVolumeLabel-len(label))
+}
+
 func validateChunk(chunk settings.Chunk, targetBytes int64) error {
 	if chunk.Name == "" || filepath.Base(chunk.Name) != chunk.Name || chunk.Name == "." || chunk.Name == ".." {
 		return fmt.Errorf("invalid output name %q", chunk.Name)
@@ -142,7 +171,7 @@ func writeChunk(ctx context.Context, sourceDir, outputDir string, targetBytes in
 	}
 	progress.setStage(index, StageFinalizing)
 	isoFS := fs.(*iso9660.FileSystem)
-	if err := isoFS.Finalize(iso9660.FinalizeOptions{RockRidge: true}); err != nil {
+	if err := isoFS.Finalize(iso9660.FinalizeOptions{RockRidge: true, VolumeIdentifier: VolumeLabel(chunk.Name)}); err != nil {
 		return fmt.Errorf("finalize ISO: %w", err)
 	}
 

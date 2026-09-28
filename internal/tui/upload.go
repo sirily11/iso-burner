@@ -129,6 +129,9 @@ func (m Model) updateUpload(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) updateUploadKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	s := &m.itemSearch
+	if s.chosen != nil && m.uploadFiles.stage == uploadStageRunning {
+		return m.updateUploadRunKey(key)
+	}
 	switch key.Type {
 	case tea.KeyCtrlC:
 		m.cancelled = true

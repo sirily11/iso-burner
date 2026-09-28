@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -87,17 +88,48 @@ var sampleItems = []remote.Item{
 	{ID: "i3", Title: "Photo backup 2025"},
 }
 
-// itemServer is a fake rxstorage server that searches items by title.
+// itemServer is a fake rxstorage server that searches items by title and
+// keeps the file contents added to them and the upload progress reported.
 type itemServer struct {
 	client *remote.Client
 
-	mu      sync.Mutex
-	queries []string
+	mu       sync.Mutex
+	queries  []string
+	contents map[string][]remote.FileContent // by item ID
+	jobs     []remote.Job
+}
+
+func (s *itemServer) lastJob(t *testing.T) remote.Job {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.jobs) == 0 {
+		t.Fatal("no upload progress was reported")
+	}
+	return s.jobs[len(s.jobs)-1]
 }
 
 func newItemServer(t *testing.T, items []remote.Item) *itemServer {
-	s := &itemServer{}
+	s := &itemServer{contents: map[string][]remote.FileContent{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1/iso-jobs/") && r.Method == http.MethodPut {
+			var job remote.Job
+			json.NewDecoder(r.Body).Decode(&job)
+			s.mu.Lock()
+			s.jobs = append(s.jobs, job)
+			s.mu.Unlock()
+			w.Write([]byte(`{}`))
+			return
+		}
+		if id, ok := strings.CutPrefix(r.URL.Path, "/api/v1/items/"); ok && r.Method == http.MethodPost {
+			var req struct{ Data remote.FileContent }
+			json.NewDecoder(r.Body).Decode(&req)
+			s.mu.Lock()
+			s.contents[strings.TrimSuffix(id, "/contents")] = append(s.contents[strings.TrimSuffix(id, "/contents")], req.Data)
+			s.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			return
+		}
 		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/items" {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -223,6 +255,12 @@ func pickFile(t *testing.T, m Model, msg tea.Msg) Model {
 // chooses the first item.
 func openFileRules(t *testing.T, last recent.Recent) Model {
 	t.Helper()
+	m, _ := openFileRulesOn(t, last)
+	return m
+}
+
+func openFileRulesOn(t *testing.T, last recent.Recent) (Model, *itemServer) {
+	t.Helper()
 	server := newItemServer(t, sampleItems)
 	svc := &fakeAuth{user: &auth.User{ID: "u1", Name: "Ada"}}
 	m := New(Options{Auth: svc, Sync: server.client, Recent: last})
@@ -233,7 +271,7 @@ func openFileRules(t *testing.T, last recent.Recent) Model {
 	if !strings.Contains(m.View(), "Which files do you want to upload?") {
 		t.Fatalf("choosing an item should ask which files to upload:\n%s", m.View())
 	}
-	return m
+	return m, server
 }
 
 func writeSizedFiles(t *testing.T, root string, sizes map[string]int) {
@@ -362,5 +400,101 @@ func TestUploadFilesUnreadableISO(t *testing.T) {
 	m = pickFile(t, m, enter)
 	if m.uploadFiles.stage != uploadStageISO || m.uploadFiles.err == nil || !strings.Contains(m.View(), "✗") {
 		t.Fatalf("an unreadable ISO should show an error and stay on the picker:\n%s", m.View())
+	}
+}
+
+func TestUploadRunsFromReview(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"docs/a.txt": 10, "b.pdf": 20})
+	m, server := openFileRulesOn(t, recent.Recent{Folder: root})
+	m = send(t, m, key("1"))
+	m = pickFile(t, m, enter)
+	m = send(t, m, enter)
+	if m.uploadFiles.stage != uploadStageReview || !strings.Contains(m.View(), "enter: upload") {
+		t.Fatalf("review should offer to upload:\n%s", m.View())
+	}
+
+	next, cmd := m.Update(enter)
+	m = next.(Model)
+	if m.uploadFiles.stage != uploadStageRunning || !strings.Contains(m.View(), "Uploading 2 file(s) to") {
+		t.Fatalf("enter should start the upload:\n%s", m.View())
+	}
+	// Run the upload and one progress tick, then deliver the result.
+	var done tea.Msg
+	for _, c := range cmd().(tea.BatchMsg) {
+		switch msg := c().(type) {
+		case uploadDoneMsg:
+			done = msg
+		default:
+			next, _ = m.Update(msg)
+			m = next.(Model)
+		}
+	}
+	next, _ = m.Update(done)
+	m = next.(Model)
+	view := m.View()
+	if !strings.Contains(view, "✓ Uploaded 2 file(s) to") || !strings.Contains(view, "2 done") {
+		t.Fatalf("finished upload should say so:\n%s", view)
+	}
+	server.mu.Lock()
+	got := server.contents["i1"]
+	server.mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("item i1 contents = %+v, want 2 files", got)
+	}
+	if uploaded, failed, total, err, ok := m.UploadResult(); !ok || uploaded != 2 || failed != 0 || total != 2 || err != nil {
+		t.Errorf("UploadResult = %d, %d, %d, %v, %v", uploaded, failed, total, err, ok)
+	}
+	if err := m.CloseSync(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	job := server.lastJob(t)
+	if job.Kind != remote.KindUpload || job.Status != remote.StatusCompleted || job.Progress != 1 ||
+		job.DoneCount != 2 || job.TotalCount != 2 || job.TotalBytes != 30 || job.FinishedAt == nil ||
+		!strings.HasPrefix(job.Title, "Upload to ") {
+		t.Fatalf("final upload job = %+v", job)
+	}
+	if len(job.Tasks) != 2 {
+		t.Fatalf("tasks = %+v, want one per file", job.Tasks)
+	}
+	for _, task := range job.Tasks {
+		if task.Section != remote.SectionFile || task.Status != "done" || task.Progress != 1 || task.DoneBytes != task.TotalBytes {
+			t.Errorf("task = %+v, want a finished file row", task)
+		}
+	}
+
+	next, cmd = m.Update(enter)
+	if cmd == nil || cmd() != tea.Quit() {
+		t.Fatal("enter after the upload should exit")
+	}
+}
+
+func TestUploadRunCtrlCStops(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"a.txt": 1})
+	m, server := openFileRulesOn(t, recent.Recent{Folder: root})
+	m = send(t, m, key("1"))
+	m = pickFile(t, m, enter)
+	m = send(t, m, enter)
+	next, _ := m.Update(enter)
+	m = next.(Model)
+
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
+	if !m.uploadFiles.run.cancelling || m.cancelled || !strings.Contains(m.View(), "Cancelling") {
+		t.Fatalf("ctrl+c should stop the upload rather than quit at once:\n%s", m.View())
+	}
+	next, cmd := m.Update(uploadDoneMsg{err: context.Canceled})
+	m = next.(Model)
+	if !m.cancelled || cmd == nil || cmd() != tea.Quit() {
+		t.Fatal("the stopped upload should quit as cancelled")
+	}
+	if _, _, _, _, ok := m.UploadResult(); ok {
+		t.Error("a cancelled upload should not report a result")
+	}
+	if err := m.CloseSync(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if job := server.lastJob(t); job.Status != remote.StatusCancelled || job.FinishedAt == nil {
+		t.Errorf("stopped upload job = %+v, want cancelled", job)
 	}
 }

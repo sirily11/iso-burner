@@ -38,6 +38,7 @@ const (
 	uploadStagePattern
 	uploadStageISO
 	uploadStageReview
+	uploadStageRunning
 )
 
 // uploadFiles chooses the files that are uploaded to the chosen item.
@@ -57,6 +58,8 @@ type uploadFiles struct {
 	loading bool            // the folder is being scanned or the ISO read
 	offset  int             // first file shown on the review screen
 	err     error
+
+	run uploadRun // the upload, once started from the review screen
 }
 
 // isoListMsg carries the files read from an ISO image.
@@ -92,6 +95,9 @@ func (f *uploadFiles) refreshMatches() {
 // updateUploadFiles handles non-key messages once an item has been chosen.
 func (m Model) updateUploadFiles(msg tea.Msg) (tea.Model, tea.Cmd) {
 	f := &m.uploadFiles
+	if f.stage == uploadStageRunning {
+		return m.updateUploadRun(msg)
+	}
 	switch msg := msg.(type) {
 	case scanDoneMsg:
 		if f.stage != uploadStageFolder || !f.loading || msg.folder != f.folder {
@@ -196,6 +202,8 @@ func (m Model) updateUploadFilesKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case uploadStageReview:
 		switch key.String() {
+		case "enter":
+			return m.startUploadRun()
 		case "esc":
 			if f.rule == ruleISO {
 				f.stage = uploadStageISO
@@ -299,6 +307,8 @@ func (m Model) uploadFilesView() string {
 		}
 	case uploadStageReview:
 		b.WriteString(m.uploadReviewView())
+	case uploadStageRunning:
+		b.WriteString(m.uploadRunView())
 	}
 	if f.err != nil {
 		b.WriteString("\n" + errorStyle.Render("✗ "+truncate(f.err.Error(), 70)) + "\n")
@@ -343,6 +353,8 @@ func (m Model) uploadFilesHelp() string {
 		return "type: regex · enter: review files · esc: choose another folder · ctrl+c: quit"
 	case uploadStageISO:
 		return f.isoPicker.help()
+	case uploadStageRunning:
+		return m.uploadRunHelp()
 	}
-	return "↑/↓: scroll files · esc: back · ctrl+c: quit"
+	return "↑/↓: scroll files · enter: upload · esc: back · ctrl+c: quit"
 }
