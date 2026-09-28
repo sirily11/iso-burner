@@ -59,7 +59,10 @@ using ComTypes = System.Runtime.InteropServices.ComTypes;
 public class IsoBurnerStream : ComTypes.IStream {
 	private FileStream file;
 	private long reported = -1;
-	public IsoBurnerStream(string path) { file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20); }
+	// Share everything: FileShare.Read would fail whenever anything else
+	// (an SMB client of the share, antivirus, the indexer) holds the image
+	// with write access. Verification catches a change during the burn.
+	public IsoBurnerStream(string path) { file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 1 << 20); }
 	public void Read(byte[] pv, int cb, IntPtr pcbRead) {
 		int total = 0;
 		while (total < cb) {
