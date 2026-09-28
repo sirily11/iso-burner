@@ -44,7 +44,7 @@ func TestWizardFlow(t *testing.T) {
 		}
 	}
 
-	m := New(Options{Folder: root, OutputDir: filepath.Join(root, "output")})
+	m := New(Options{Mode: ModeGenerate, Folder: root, OutputDir: filepath.Join(root, "output")})
 	m = send(t, m, enter)
 	if m.step != stepPattern || len(m.allFiles) != 3 {
 		t.Fatalf("after folder: step=%d files=%d err=%v", m.step, len(m.allFiles), m.err)
@@ -92,13 +92,13 @@ func TestWizardFlow(t *testing.T) {
 }
 
 func TestWizardRejectsBadInput(t *testing.T) {
-	m := New(Options{Folder: filepath.Join(t.TempDir(), "missing")})
+	m := New(Options{Mode: ModeGenerate, Folder: filepath.Join(t.TempDir(), "missing")})
 	m = send(t, m, enter)
 	if m.step != stepFolder || m.err == nil {
 		t.Fatal("missing folder should be rejected")
 	}
 
-	m = New(Options{Folder: t.TempDir()})
+	m = New(Options{Mode: ModeGenerate, Folder: t.TempDir()})
 	m = send(t, m, enter)
 	m = typeText(t, m, "[z-a]")
 	m = send(t, m, enter)
@@ -118,7 +118,7 @@ func TestConfirmViewListsSplitFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := New(Options{})
+	m := New(Options{Mode: ModeGenerate})
 	m.step, m.chunks = stepConfirm, chunks
 	view := m.View()
 	for _, want := range []string{"Planned ISO 1 of 3", "movies_1.iso", "Split files (1)", "movie.mkv", "3 parts"} {
@@ -139,7 +139,7 @@ func TestConfirmPreviewScrollsFilesAndResetsOnNextISO(t *testing.T) {
 	for i := range files {
 		files[i] = settings.File{RelPath: fmt.Sprintf("file-%02d.txt", i), Size: int64(i + 1)}
 	}
-	m := New(Options{})
+	m := New(Options{Mode: ModeGenerate})
 	m.step = stepConfirm
 	m.chunks = []settings.Chunk{{Index: 1, Name: "backup_1.iso", Pieces: make([]settings.Piece, len(files))}}
 	for i := 2; i <= 10; i++ {

@@ -32,6 +32,25 @@ func newFolderPicker(hint string) folderPicker {
 	return p
 }
 
+// newFolderPickerAt starts browsing in the parent of folder with folder
+// highlighted, so enter picks it again. It falls back to newFolderPicker when
+// folder is not an existing directory.
+func newFolderPickerAt(folder string) folderPicker {
+	folder = strings.TrimSpace(folder)
+	info, err := os.Stat(folder)
+	if folder == "" || err != nil || !info.IsDir() {
+		return newFolderPicker(folder)
+	}
+	abs, err := filepath.Abs(folder)
+	if err != nil || filepath.Dir(abs) == abs {
+		return newFolderPicker(folder)
+	}
+	var p folderPicker
+	p.showHidden = strings.HasPrefix(filepath.Base(abs), ".")
+	p.load(filepath.Dir(abs), filepath.Base(abs))
+	return p
+}
+
 func startDir(hint string) string {
 	hint = strings.TrimSpace(hint)
 	if strings.HasPrefix(hint, "~") {

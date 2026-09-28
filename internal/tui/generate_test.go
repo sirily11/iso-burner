@@ -15,7 +15,7 @@ import (
 )
 
 func TestGenerateViewListsActiveFirstAndScrolls(t *testing.T) {
-	m := New(Options{Folder: "x", OutputDir: "/out"})
+	m := New(Options{Mode: ModeGenerate, Folder: "x", OutputDir: "/out"})
 	m.step, m.generating = stepGenerate, true
 	for i := 1; i <= 8; i++ {
 		m.chunks = append(m.chunks, settings.Chunk{Index: i, Name: fmt.Sprintf("backup_%d.iso", i), Size: 100})
@@ -52,7 +52,7 @@ func TestConfirmGeneratesISOsInsideTUI(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := filepath.Join(root, "output")
-	m := New(Options{Folder: root, OutputDir: out})
+	m := New(Options{Mode: ModeGenerate, Folder: root, OutputDir: out})
 	m = send(t, m, enter)
 	m = send(t, m, enter)
 	m = send(t, m, enter)

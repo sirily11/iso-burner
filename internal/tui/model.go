@@ -4,8 +4,11 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -13,8 +16,14 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/sirily11/iso-burner/internal/auth"
+	"github.com/sirily11/iso-burner/internal/burn"
+	"github.com/sirily11/iso-burner/internal/drive"
 	"github.com/sirily11/iso-burner/internal/iso"
+	"github.com/sirily11/iso-burner/internal/recent"
+	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/settings"
+	"github.com/sirily11/iso-burner/internal/store"
 )
 
 type step int
@@ -55,16 +64,95 @@ type scanDoneMsg struct {
 
 // Options pre-fills the wizard, e.g. from command-line flags.
 type Options struct {
-	Folder    string
-	Pattern   string
-	ISOName   string
-	OutputDir string
+	// Mode skips the mode selection screen when set.
+	Mode Mode
+	// ListDrives finds disc drives for burn mode; nil uses drive.List.
+	ListDrives DriveLister
+	// Store records burn sessions so they can be resumed; burning needs it.
+	Store *store.Store
+	// DBPath is shown so the user knows where progress is saved.
+	DBPath string
+	// Burner writes discs; nil uses burn.System().
+	Burner burn.Burner
+	// Auth signs in with RxAuth; nil disables the account screen.
+	Auth auth.Service
+	// Sync sends generation and burning progress to rxstorage while signed
+	// in; nil disables syncing.
+	Sync *remote.Client
+	// SyncInterval throttles progress reports; zero uses remote.DefaultInterval.
+	SyncInterval time.Duration
+	// Recent pre-fills anything the other options leave empty with what the
+	// last run selected.
+	Recent recent.Recent
+	// RecentPath is where selections are remembered; empty disables saving.
+	RecentPath string
+	Folder     string
+	Pattern    string
+	ISOName    string
+	OutputDir  string
 }
 
 // Model is the Bubble Tea model for the settings wizard.
 type Model struct {
 	step step
 	err  error
+
+	mode       Mode
+	modeIdx    int
+	modeChosen bool // mode was picked on the selection screen, so esc returns there
+
+	auth           auth.Service
+	user           *auth.User // nil when signed out
+	authChecking   bool
+	authErr        error
+	showAccount    bool // the account screen is showing over mode selection
+	signingIn      bool
+	signInURL      string
+	signInCancel   context.CancelFunc
+	confirmSignOut bool
+
+	sync         *remote.Client
+	syncInterval time.Duration
+	hostName     string
+	genSync      *remote.Reporter // nil unless generation progress is synced
+	burnSync     *remote.Reporter // nil unless burning progress is synced
+	syncDiscs    []store.Disc     // the burn session's discs, for per-ISO rows
+	syncDiscsAt  time.Time
+
+	recent     recent.Recent
+	recentPath string
+
+	isoHint   string // where the ISO picker starts browsing
+	isoPicker isoPicker
+	burnISOs  []string
+
+	replicas        replicaEditor
+	settingReplicas bool           // the copies screen is showing instead of the ISO picker
+	replicaCounts   map[string]int // copies by ISO path, kept when going back to the picker
+	burnJobs        []BurnJob
+
+	listDrives DriveLister
+	drives     DriveSelector
+	burnDrives []drive.Drive
+
+	store       *store.Store
+	dbPath      string
+	burner      burn.Burner
+	resumeOffer *store.Session // unfinished session offered for resuming
+	resumeDiscs []store.Disc
+	resumeErr   error
+	resuming    *store.Session // session chosen to resume
+	burnErr     error          // why burning could not start
+
+	engine      *burn.Engine
+	burnSession int64
+	burnSnap    burn.Snapshot
+	burnDiscs   []store.Disc // loaded once burning ends
+	burnStarted time.Time
+	burnElapsed time.Duration
+	burnStopped bool
+	confirmStop bool
+	dismissed   map[string]int64 // drive ID → disc whose insert dialog was put off
 
 	folderInput  textinput.Model
 	picker       folderPicker
@@ -98,25 +186,62 @@ type Model struct {
 
 // New builds a wizard model with the given pre-filled values.
 func New(opts Options) Model {
+	last := opts.Recent
+	sourceFolder := opts.Folder
+	if sourceFolder == "" && settings.ValidateFolder(last.Folder) == nil {
+		sourceFolder = last.Folder
+	}
 	folder := textinput.New()
 	folder.Placeholder = "/path/to/source"
-	folder.SetValue(opts.Folder)
+	folder.SetValue(sourceFolder)
 	folder.Focus()
 
 	pattern := textinput.New()
 	pattern.Placeholder = `.*  (regex like \.(mkv|mp4)$ or glob like **/*.mp4)`
-	pattern.SetValue(opts.Pattern)
+	pattern.SetValue(cmp.Or(opts.Pattern, last.Pattern))
 
 	name := textinput.New()
 	name.Placeholder = "backup"
-	name.SetValue(opts.ISOName)
+	name.SetValue(cmp.Or(opts.ISOName, last.ISOName))
 
-	m := Model{folderInput: folder, patternInput: pattern, nameInput: name, outputDir: opts.OutputDir}
+	m := Model{mode: opts.Mode, folderInput: folder, patternInput: pattern, nameInput: name, outputDir: opts.OutputDir,
+		listDrives: opts.ListDrives, store: opts.Store, dbPath: opts.DBPath, burner: opts.Burner,
+		auth: opts.Auth, authChecking: opts.Auth != nil,
+		sync: opts.Sync, syncInterval: opts.SyncInterval,
+		recent: last, recentPath: opts.RecentPath}
+	for i, p := range settings.Presets {
+		if p.Name == last.Preset {
+			m.presetIdx = i
+		}
+	}
+	if m.syncInterval <= 0 {
+		m.syncInterval = remote.DefaultInterval
+	}
+	m.hostName, _ = os.Hostname()
+	if m.burner == nil {
+		m.burner = burn.System()
+	}
+	// Burn mode browses for ISOs, starting where they were most likely written.
+	m.isoHint = cmp.Or(opts.Folder, last.ISODir, opts.OutputDir)
+	if m.mode == ModeBurn {
+		m.isoPicker = newISOPicker(m.isoHint)
+		m.isoPicker.preselect(m.recent.ISOs)
+		m.offerResume()
+	}
 	if opts.Folder == "" {
-		// Nothing to edit yet, so start by browsing for a folder.
-		m.picker, m.picking = newFolderPicker(""), true
+		// Nothing typed yet, so start by browsing for a folder, with the
+		// last used one highlighted.
+		m.picker, m.picking = newFolderPickerAt(sourceFolder), true
 	}
 	return m
+}
+
+// saveRecent remembers the current selections for the next run. Failing to
+// save only loses the convenience, so errors are ignored.
+func (m Model) saveRecent() {
+	if m.recentPath != "" {
+		_ = recent.Save(m.recentPath, m.recent)
+	}
 }
 
 // Result returns the confirmed settings and the planned chunks, or nil if the
@@ -128,10 +253,26 @@ func (m Model) Result() (*settings.Settings, []settings.Chunk) {
 	return m.result, m.chunks
 }
 
+// Mode returns the mode the user chose, or ModeNone if they quit first.
+func (m Model) Mode() Mode {
+	if m.cancelled {
+		return ModeNone
+	}
+	return m.mode
+}
+
 // GenerateErr reports why ISO generation failed, if it did.
 func (m Model) GenerateErr() error { return m.genErr }
 
-func (m Model) Init() tea.Cmd { return textinput.Blink }
+func (m Model) Init() tea.Cmd {
+	if m.auth == nil {
+		return textinput.Blink
+	}
+	return tea.Batch(textinput.Blink, checkAuthCmd(m.auth))
+}
+
+// User returns the signed-in RxAuth account, or nil.
+func (m Model) User() *auth.User { return m.user }
 
 func scanCmd(folder string) tea.Cmd {
 	return func() tea.Msg {
@@ -144,6 +285,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if size, ok := msg.(tea.WindowSizeMsg); ok {
 		m.width = size.Width
 		return m, nil
+	}
+	if next, ok := m.updateAuthMsg(msg); ok {
+		return next, nil
+	}
+	if m.mode == ModeNone {
+		if key, ok := msg.(tea.KeyMsg); ok {
+			if m.showAccount {
+				return m.updateAccount(key)
+			}
+			return m.updateMode(key)
+		}
+		return m, nil
+	}
+	if m.mode == ModeBurn {
+		return m.updateBurn(msg)
 	}
 	if m.step == stepGenerate {
 		return m.updateGenerate(msg)
@@ -168,6 +324,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cancelled = true
 			return m, tea.Quit
 		case tea.KeyEsc:
+			if m.step == stepFolder && m.modeChosen {
+				m.mode, m.err = ModeNone, nil
+				return m, nil
+			}
 			if m.step == stepFolder {
 				m.cancelled = true
 				return m, tea.Quit
@@ -324,6 +484,13 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 			Preset:  settings.Presets[m.presetIdx],
 			ISOName: strings.TrimSpace(m.nameInput.Value()),
 		}
+		if abs, err := filepath.Abs(m.result.Folder); err == nil {
+			m.recent.Folder = abs
+		}
+		m.recent.Pattern = m.patternInput.Value()
+		m.recent.ISOName = m.result.ISOName
+		m.recent.Preset = m.result.Preset.Name
+		m.saveRecent()
 		return m.startGenerate()
 	}
 	return m, nil
@@ -350,11 +517,24 @@ func (m Model) goTo(s step) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) View() string {
-	if m.step != stepGenerate && (m.result != nil || m.cancelled) {
+	if m.cancelled || (m.step != stepGenerate && m.result != nil) {
 		return ""
+	}
+	if m.mode == ModeBurn {
+		return m.burnView()
 	}
 
 	var b strings.Builder
+	if m.mode == ModeNone {
+		if m.showAccount {
+			return m.accountView()
+		}
+		b.WriteString(titleStyle.Render("ISO Burner") + "\n")
+		b.WriteString(m.accountSummary() + "\n\n")
+		b.WriteString(m.modeView())
+		b.WriteString("\n" + dimStyle.Render("↑/↓: choose · 1/2 or enter: select · a: account · esc: quit"))
+		return panelStyle.Render(b.String()) + "\n"
+	}
 	title := "ISO Burner · Settings"
 	if m.step == stepGenerate {
 		title = "ISO Burner · Generate"
@@ -539,6 +719,9 @@ func (m Model) help() string {
 	case stepFolder:
 		if m.picking {
 			return m.picker.help()
+		}
+		if m.modeChosen {
+			return "enter: scan folder · tab: browse folders · esc: back"
 		}
 		return "enter: scan folder · tab: browse folders · esc: quit"
 	case stepSize:
