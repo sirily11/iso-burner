@@ -16,13 +16,16 @@ type SizePreset struct {
 	Bytes int64
 }
 
-// Presets are the supported target ISO sizes. Each target is about 2% below
-// the disc's exact user-data capacity (25,025,314,816 bytes for BD-25 and
-// 50,050,629,632 for BD-50), leaving headroom for burners that reserve spare
-// area. Sizes are decimal gigabytes, as shown by Finder.
+// Presets are the supported target ISO sizes. Burners such as Windows' IMAPI2
+// format BD-R with the default spare areas for defect management, which
+// leaves 24,220,008,448 bytes on a BD-25 and 48,440,016,896 on a BD-50
+// (shown as 22.5 and 45.1 GB by Explorer) instead of the unformatted
+// 25,025,314,816 and 50,050,629,632. BD-25 targets about 1% below its
+// formatted capacity and BD-50 about 7%, for extra headroom. Sizes are
+// decimal gigabytes, as shown by Finder.
 var Presets = []SizePreset{
-	{Name: "Blu-ray 25GB (BD-25)", Bytes: 24_500_000_000},
-	{Name: "Blu-ray 50GB (BD-50)", Bytes: 49_000_000_000},
+	{Name: "Blu-ray 25GB (BD-25)", Bytes: 24_000_000_000},
+	{Name: "Blu-ray 50GB (BD-50)", Bytes: 45_000_000_000},
 }
 
 // Settings is the complete configuration collected by the TUI.
