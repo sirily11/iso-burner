@@ -264,7 +264,7 @@ func (e *Engine) run(i int) {
 				e.fail(err)
 				return
 			}
-			slog.Error("disc failed", "drive", d.ID, "disc", disc.ID, "iso", disc.ISOPath, "attempt", disc.Attempts, "err", err)
+			slog.Error("disc failed", "drive", d.ID, "disc", disc.ID, "iso", disc.ISOPath, "size", disc.ISOSize, "attempt", disc.Attempts, "err", err)
 			e.update(i, func(s *DriveStatus) { s.Err = err.Error() })
 			e.cfg.Burner.Eject(bg, d)
 		}

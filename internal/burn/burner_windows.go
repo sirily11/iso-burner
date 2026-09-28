@@ -105,21 +105,28 @@ try {
 	$format = New-Object -ComObject IMAPI2.MsftDiscFormat2Data
 	if (-not $format.IsRecorderSupported($recorder)) { throw "drive $letter cannot burn data discs" }
 	$format.Recorder = $recorder
+	$types = @('unknown media', 'CD-ROM', 'CD-R', 'CD-RW', 'DVD-ROM', 'DVD-RAM', 'DVD+R', 'DVD+RW',
+		'DVD+R DL', 'DVD-R', 'DVD-RW', 'DVD-R DL', 'disk', 'DVD+RW DL', 'HD DVD-ROM', 'HD DVD-R',
+		'HD DVD-RAM', 'BD-ROM', 'BD-R', 'BD-RE')
 	# A freshly inserted disc takes a while to spin up, and until then IMAPI2
 	# reports it as unsupported, so give the drive time to become ready.
 	$deadline = (Get-Date).AddSeconds(60)
 	while (-not $format.IsCurrentMediaSupported($recorder)) {
 		if ((Get-Date) -gt $deadline) {
-			$types = @('unknown media', 'CD-ROM', 'CD-R', 'CD-RW', 'DVD-ROM', 'DVD-RAM', 'DVD+R', 'DVD+RW',
-				'DVD+R DL', 'DVD-R', 'DVD-RW', 'DVD-R DL', 'disk', 'DVD+RW DL', 'HD DVD-ROM', 'HD DVD-R',
-				'HD DVD-RAM', 'BD-ROM', 'BD-R', 'BD-RE')
 			try { $type = $types[[int]$format.CurrentPhysicalMediaType] } catch { $type = $null }
 			if (-not $type) { throw "no disc in $letter, or the drive is not ready" }
 			throw "the $type disc in $letter cannot be written (it may be finalized, read-only or unsupported)"
 		}
 		Start-Sleep -Seconds 2
 	}
-	if (-not $format.MediaHeuristicallyBlank) { throw "the disc in $letter is not blank" }
+	$type = $types[[int]$format.CurrentPhysicalMediaType]
+	if (-not $format.MediaHeuristicallyBlank) { throw "the $type disc in $letter is not blank" }
+	# IMAPI2's own "stream too large" error gives no sizes, so check first.
+	$size = (Get-Item -LiteralPath $env:ISO_BURNER_ISO).Length
+	$free = [int64]$format.FreeSectorsOnMedia * 2048
+	if ($size -gt $free) {
+		throw ("the ISO is {0:N2} GB ({1} bytes) but the {2} disc in {3} only holds {4:N2} GB ({5} bytes)" -f ($size / 1e9), $size, $type, $letter, ($free / 1e9), $free)
+	}
 	$format.ClientName = 'iso-burner'
 	$format.ForceMediaToBeClosed = $true
 	$stream = New-Object IsoBurnerStream $env:ISO_BURNER_ISO
