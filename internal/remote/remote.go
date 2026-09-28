@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -126,6 +127,12 @@ func (c *Client) PutJob(ctx context.Context, id string, job Job) error {
 		return err
 	}
 	defer resp.Body.Close()
+	var data []byte
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		data, _ = io.ReadAll(io.LimitReader(resp.Body, 4096))
+		slog.Error("rxstorage request failed", "method", req.Method, "url", req.URL.String(),
+			"job", id, "status", resp.StatusCode, "body", string(data))
+	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return ErrUnauthorized
 	}
@@ -133,7 +140,6 @@ func (c *Client) PutJob(ctx context.Context, id string, job Job) error {
 		var e struct {
 			Error string `json:"error"`
 		}
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		if json.Unmarshal(data, &e) == nil && e.Error != "" {
 			return fmt.Errorf("rxstorage: %s (HTTP %d)", e.Error, resp.StatusCode)
 		}
