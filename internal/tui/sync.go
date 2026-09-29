@@ -215,6 +215,7 @@ func (m Model) burnJob() remote.Job {
 		done, copies int
 		fraction     float64
 		drives       []string // drives that burned a copy, in order
+		assigned     []string // drives currently holding an unfinished copy
 	}
 	var order []string
 	rows := map[string]*isoRow{}
@@ -226,8 +227,12 @@ func (m Model) burnJob() remote.Job {
 			order = append(order, d.ISOPath)
 		}
 		status, progress, total, discErr := d.Status, d.Progress, d.Total, d.Error
+		driveID := d.DriveID
 		if l, ok := live[d.ID]; ok {
+			driveID = l.Drive.ID
 			switch l.State {
+			case store.DriveWaiting:
+				status = store.DiscAssigned
 			case store.DriveBurning:
 				status, progress, total, discErr = store.DiscBurning, l.Progress, l.Total, ""
 			case store.DriveVerifying:
@@ -246,11 +251,16 @@ func (m Model) burnJob() remote.Job {
 		switch status {
 		case store.DiscDone:
 			row.done++
-			if id := driveLetter(d.DriveID); id != "" && !slices.Contains(row.drives, id) {
+			if id := driveLetter(driveID); id != "" && !slices.Contains(row.drives, id) {
 				row.drives = append(row.drives, id)
 			}
-		case store.DiscBurning, store.DiscVerifying:
-			row.task.Status = "burning"
+		case store.DiscAssigned, store.DiscBurning, store.DiscVerifying:
+			if status != store.DiscAssigned {
+				row.task.Status = "burning"
+			}
+			if id := driveLetter(driveID); id != "" && !slices.Contains(row.assigned, id) {
+				row.assigned = append(row.assigned, id)
+			}
 		}
 		if discErr != "" && status != store.DiscDone {
 			row.task.Error = discErr
@@ -262,6 +272,9 @@ func (m Model) burnJob() remote.Job {
 		row.task.Detail = fmt.Sprintf("%d of %d copies burned", row.done, row.copies)
 		if len(row.drives) > 0 {
 			row.task.Detail += " in " + strings.Join(row.drives, ", ")
+		}
+		if len(row.assigned) > 0 {
+			row.task.Detail += " · assigned to " + strings.Join(row.assigned, ", ")
 		}
 		if row.done == row.copies {
 			row.task.Status, row.task.Progress = "done", 1

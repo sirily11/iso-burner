@@ -107,6 +107,27 @@ func startBurnFlow(t *testing.T, m Model, copies string, driveKeys ...string) Mo
 	return send(t, m, enter)
 }
 
+func TestBurnProgressIdentifiesMatchingDrives(t *testing.T) {
+	for _, state := range []store.DriveState{store.DriveBurning, store.DriveVerifying, store.DriveWaiting, store.DriveFinished, store.DriveIdle} {
+		t.Run(string(state), func(t *testing.T) {
+			m := Model{burnSnap: burn.Snapshot{Running: true, Total: 2}}
+			for i, id := range []string{"E:", "F:"} {
+				m.burnSnap.Drives = append(m.burnSnap.Drives, burn.DriveStatus{
+					Drive: drive.Drive{ID: id, Vendor: "ASUS", Model: "BW-16D1HT with a long model name"},
+					State: state,
+					Disc:  &store.Disc{ID: int64(i + 1), ISOPath: "backup_1.iso", Copy: i + 1, Copies: 2},
+				})
+			}
+			view := m.burnProgressView()
+			for _, label := range []string{"E · ASUS BW-16D1HT", "F · ASUS BW-16D1HT"} {
+				if !strings.Contains(view, label) {
+					t.Errorf("drive label %q missing from progress view:\n%s", label, view)
+				}
+			}
+		})
+	}
+}
+
 func TestBurningShowsPerDriveProgressAndAsksForDiscs(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, "backup_1.iso")
