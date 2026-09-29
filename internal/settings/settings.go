@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -21,11 +22,18 @@ type SizePreset struct {
 // leaves 24,220,008,448 bytes on a BD-25 and 48,440,016,896 on a BD-50
 // (shown as 22.5 and 45.1 GB by Explorer) instead of the unformatted
 // 25,025,314,816 and 50,050,629,632. BD-25 targets about 1% below its
-// formatted capacity and BD-50 about 7%, for extra headroom. Sizes are
+// formatted capacity; BD-50 targets 500 MB below, the formatted capacity
+// having been confirmed on real drives. Generate never writes an ISO larger
+// than the target. BDXL discs
+// (100,103,356,416 bytes unformatted for BD-100 and 128,001,769,472 for
+// BD-128) target about 7% below their raw capacity, since their formatted
+// capacity varies by burner. Sizes are
 // decimal gigabytes, as shown by Finder.
 var Presets = []SizePreset{
 	{Name: "Blu-ray 25GB (BD-25)", Bytes: 24_000_000_000},
-	{Name: "Blu-ray 50GB (BD-50)", Bytes: 45_000_000_000},
+	{Name: "Blu-ray 50GB (BD-50)", Bytes: 47_940_000_000},
+	{Name: "Blu-ray XL 100GB (BD-100)", Bytes: 93_000_000_000},
+	{Name: "Blu-ray XL 128GB (BD-128)", Bytes: 119_000_000_000},
 }
 
 // Settings is the complete configuration collected by the TUI.
@@ -34,6 +42,8 @@ type Settings struct {
 	Pattern *regexp.Regexp
 	Preset  SizePreset
 	ISOName string
+	// StartIndex numbers the first ISO; the rest follow consecutively.
+	StartIndex int
 }
 
 // invalidNameChars are characters that are unsafe in file names on common
@@ -135,8 +145,31 @@ func ValidateISOName(name string) error {
 	return nil
 }
 
+// MaxStartIndex bounds the first ISO number so numbering cannot overflow.
+const MaxStartIndex = 1_000_000
+
+// ParseStartIndex parses the number of the first ISO. Empty means 1.
+func ParseStartIndex(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 1, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, errors.New("start index must be a whole number")
+	}
+	return n, ValidateStartIndex(n)
+}
+
+// ValidateStartIndex checks that n can number the first ISO.
+func ValidateStartIndex(n int) error {
+	if n < 0 || n > MaxStartIndex {
+		return fmt.Errorf("start index must be between 0 and %d", MaxStartIndex)
+	}
+	return nil
+}
+
 // OutputName returns the file name for a chunk: {iso_name}_{chunk_index}.iso.
-// Chunk indexes are 1-based.
 func OutputName(isoName string, chunkIndex int) string {
 	return fmt.Sprintf("%s_%d.iso", isoName, chunkIndex)
 }

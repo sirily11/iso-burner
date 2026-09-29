@@ -130,15 +130,19 @@ func alignUp(n int64) int64   { return (n + SectorSize - 1) / SectorSize * Secto
 func alignDown(n int64) int64 { return n / SectorSize * SectorSize }
 
 // PlanChunks packs files, in order, into ISOs whose used space never exceeds
-// capacity, naming each ISO with OutputName. Files that fit on an empty ISO
+// capacity, naming each ISO with OutputName and numbering them from
+// startIndex. Files that fit on an empty ISO
 // are kept whole and start a new ISO when the current one is full. Files too
 // large for a single ISO or its file-entry limit are split into parts.
-func PlanChunks(files []File, capacity int64, isoName string) ([]Chunk, error) {
+func PlanChunks(files []File, capacity int64, isoName string, startIndex int) ([]Chunk, error) {
+	if err := ValidateStartIndex(startIndex); err != nil {
+		return nil, err
+	}
 	capacity = alignDown(capacity)
 	if capacity < pieceCost(SectorSize) {
 		return nil, errors.New("target ISO size is too small to hold any data")
 	}
-	p := planner{capacity: capacity, isoName: isoName}
+	p := planner{capacity: capacity, isoName: isoName, startIndex: startIndex}
 	for _, f := range files {
 		if f.Size <= MaxPieceSize && pieceCost(f.Size) <= capacity {
 			if p.free() < pieceCost(f.Size) {
@@ -153,9 +157,10 @@ func PlanChunks(files []File, capacity int64, isoName string) ([]Chunk, error) {
 }
 
 type planner struct {
-	capacity int64
-	isoName  string
-	chunks   []Chunk
+	capacity   int64
+	isoName    string
+	startIndex int
+	chunks     []Chunk
 }
 
 // free is the unused space on the current ISO, or 0 if none is open.
@@ -167,7 +172,7 @@ func (p *planner) free() int64 {
 }
 
 func (p *planner) open() {
-	idx := len(p.chunks) + 1
+	idx := p.startIndex + len(p.chunks)
 	p.chunks = append(p.chunks, Chunk{Index: idx, Name: OutputName(p.isoName, idx)})
 }
 

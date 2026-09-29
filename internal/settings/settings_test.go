@@ -68,7 +68,7 @@ func TestPlanChunks(t *testing.T) {
 	const S = SectorSize
 	// Every piece costs its sector-aligned length plus one sector of metadata.
 	files := []File{{"a", 5 * S}, {"b", 3 * S}, {"c", 2 * S}, {"d.mkv", 20 * S}, {"e", 1}}
-	chunks, err := PlanChunks(files, 10*S, "disc")
+	chunks, err := PlanChunks(files, 10*S, "disc", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +110,7 @@ func TestPlanChunks(t *testing.T) {
 		t.Errorf("whole file should not be split: %+v", p)
 	}
 
-	if _, err := PlanChunks(files, S, "disc"); err == nil {
+	if _, err := PlanChunks(files, S, "disc", 1); err == nil {
 		t.Fatal("expected error for capacity too small to hold data")
 	}
 }
@@ -122,7 +122,7 @@ func TestPlanChunksCoversEveryByte(t *testing.T) {
 	for i := range 200 {
 		files = append(files, File{fmt.Sprintf("f%d", i), rng.Int64N(3 * capacity)})
 	}
-	chunks, err := PlanChunks(files, capacity, "disc")
+	chunks, err := PlanChunks(files, capacity, "disc", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +152,7 @@ func TestPlanChunksCoversEveryByte(t *testing.T) {
 
 func TestPlanChunksCapsISO9660FileLength(t *testing.T) {
 	f := File{RelPath: "large.bin", Size: MaxPieceSize + SectorSize}
-	chunks, err := PlanChunks([]File{f}, 25_025_314_816-ReservedPerISO, "backup")
+	chunks, err := PlanChunks([]File{f}, 25_025_314_816-ReservedPerISO, "backup", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,5 +205,38 @@ func TestScanAndFilter(t *testing.T) {
 	re, _ = CompilePattern(`^sub/`)
 	if m := Filter(files, re); len(m) != 1 || m[0].RelPath != "sub/b.mkv" {
 		t.Fatalf("relative-path match failed: %+v", m)
+	}
+}
+
+func TestPlanChunksStartIndex(t *testing.T) {
+	const S = SectorSize
+	files := []File{{"a", 5 * S}, {"b", 5 * S}, {"c", 5 * S}}
+	chunks, err := PlanChunks(files, 10*S, "disc", 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) != 3 {
+		t.Fatalf("got %d chunks, want 3", len(chunks))
+	}
+	for i, c := range chunks {
+		if c.Index != 7+i || c.Name != OutputName("disc", 7+i) {
+			t.Errorf("chunk %d named %d/%q", i, c.Index, c.Name)
+		}
+	}
+	if _, err := PlanChunks(files, 10*S, "disc", -1); err == nil {
+		t.Error("negative start index should be rejected")
+	}
+}
+
+func TestParseStartIndex(t *testing.T) {
+	for in, want := range map[string]int{"": 1, " 12 ": 12, "0": 0} {
+		if got, err := ParseStartIndex(in); err != nil || got != want {
+			t.Errorf("ParseStartIndex(%q) = %d, %v; want %d", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"x", "1.5", "-3", "99999999"} {
+		if _, err := ParseStartIndex(in); err == nil {
+			t.Errorf("ParseStartIndex(%q) should fail", in)
+		}
 	}
 }

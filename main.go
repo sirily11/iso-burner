@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -25,10 +26,11 @@ import (
 func main() {
 	var opts tui.Options
 	var outputDir, mode, dbPath, serverURL string
-	flag.StringVar(&mode, "mode", "", `"generate" or "burn"; asks when empty`)
+	flag.StringVar(&mode, "mode", "", `"generate", "burn" or "printer"; asks when empty`)
 	flag.StringVar(&opts.Folder, "folder", "", "source folder to pre-fill; in burn mode, where to browse for ISOs")
 	flag.StringVar(&opts.Pattern, "regex", "", "file-selection regex to pre-fill")
 	flag.StringVar(&opts.ISOName, "name", "", "ISO name to pre-fill")
+	flag.StringVar(&opts.StartIndex, "start", "", "number of the first ISO to pre-fill (default 1)")
 	flag.StringVar(&outputDir, "output", ".", "directory for generated ISO files")
 	flag.StringVar(&dbPath, "db", "", "SQLite database that records burn progress (default: in the user config directory)")
 	flag.StringVar(&serverURL, "server", config.RxStorageURL, `rxstorage server that progress is synced to while signed in; "" disables syncing`)
@@ -39,8 +41,10 @@ func main() {
 		opts.Mode = tui.ModeGenerate
 	case "burn":
 		opts.Mode = tui.ModeBurn
+	case "printer":
+		opts.Mode = tui.ModePrinter
 	default:
-		fmt.Fprintf(os.Stderr, "unknown mode %q (want \"generate\" or \"burn\")\n", mode)
+		fmt.Fprintf(os.Stderr, "unknown mode %q (want \"generate\", \"burn\" or \"printer\")\n", mode)
 		os.Exit(2)
 	}
 	if opts.Folder == "" && flag.NArg() > 0 {
@@ -72,7 +76,7 @@ func main() {
 		opts.RecentPath = path
 	}
 
-	if opts.Mode != tui.ModeGenerate {
+	if opts.Mode != tui.ModeGenerate && opts.Mode != tui.ModePrinter {
 		if dbPath == "" {
 			if dbPath, err = store.DefaultPath(); err != nil {
 				fmt.Fprintln(os.Stderr, "burn database:", err)
@@ -113,6 +117,12 @@ func main() {
 	}
 	if m.Mode() == tui.ModeBurn {
 		os.Exit(burnSummary(m, dbPath))
+	}
+	if m.Mode() == tui.ModePrinter {
+		if shared := m.SharedPrinters(); len(shared) > 0 {
+			fmt.Printf("Still sharing via AirPrint: %s\n", strings.Join(shared, ", "))
+		}
+		os.Exit(0)
 	}
 	if m.Mode() == tui.ModeUpload {
 		os.Exit(uploadSummary(m))

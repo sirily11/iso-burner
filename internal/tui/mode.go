@@ -19,6 +19,8 @@ const (
 	ModeBurn
 	// ModeUpload uploads files as content of an rxstorage item.
 	ModeUpload
+	// ModePrinter shares printers via AirPrint and shows their job queues.
+	ModePrinter
 )
 
 // modeChoice is one entry on the mode selection screen.
@@ -32,6 +34,7 @@ var modeChoices = []modeChoice{
 	{ModeGenerate, "Generate ISO file", "Split a folder into size-limited ISO images"},
 	{ModeBurn, "Burn ISO", "Write ISO images to a disc drive"},
 	{ModeUpload, "Upload content to item", "Upload files as content of an rxstorage item"},
+	{ModePrinter, "Share printer (AirPrint)", "Share printers with iPhones and iPads and watch their job queues"},
 }
 
 // updateMode handles keys on the mode selection screen.
@@ -44,7 +47,7 @@ func (m Model) updateMode(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.modeIdx = (m.modeIdx + len(modeChoices) - 1) % len(modeChoices)
 	case "down", "j", "tab":
 		m.modeIdx = (m.modeIdx + 1) % len(modeChoices)
-	case "1", "2", "3":
+	case "1", "2", "3", "4":
 		m.modeIdx = int(key.Runes[0] - '1')
 		return m.chooseMode()
 	case "enter":
@@ -62,6 +65,9 @@ func (m Model) chooseMode() (tea.Model, tea.Cmd) {
 	choice := modeChoices[m.modeIdx].mode
 	if choice == ModeUpload {
 		return m.chooseUpload()
+	}
+	if choice == ModePrinter {
+		return m.startPrinters()
 	}
 	m.mode = choice
 	m.modeChosen = true
