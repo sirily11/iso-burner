@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -105,6 +106,46 @@ func (c *Client) CountItemContents(ctx context.Context, itemID string) (int, err
 		return 0, fmt.Errorf("rxstorage: reading item contents: %w", err)
 	}
 	return page.Pagination.TotalCount, nil
+}
+
+// contentTitlesPageSize is how many contents ListContentTitles reads per
+// request.
+const contentTitlesPageSize = 100
+
+// ListContentTitles returns the titles of every content item itemID has,
+// reading all pages of its contents.
+func (c *Client) ListContentTitles(ctx context.Context, itemID string) ([]string, error) {
+	var titles []string
+	q := url.Values{"limit": {strconv.Itoa(contentTitlesPageSize)}}
+	for {
+		data, err := c.do(ctx, http.MethodGet, "/api/v1/items/"+url.PathEscape(itemID)+"/contents?"+q.Encode(), nil, "item", itemID)
+		if err != nil {
+			return nil, err
+		}
+		var page struct {
+			Data []struct {
+				Data struct {
+					Title string `json:"title"`
+				} `json:"data"`
+			} `json:"data"`
+			Pagination struct {
+				NextCursor  *string `json:"nextCursor"`
+				HasNextPage bool    `json:"hasNextPage"`
+			} `json:"pagination"`
+		}
+		if err := json.Unmarshal(data, &page); err != nil {
+			return nil, fmt.Errorf("rxstorage: reading item contents: %w", err)
+		}
+		for _, content := range page.Data {
+			titles = append(titles, content.Data.Title)
+		}
+		next := page.Pagination.NextCursor
+		if !page.Pagination.HasNextPage || next == nil || *next == "" || *next == q.Get("cursor") {
+			return titles, nil
+		}
+		q.Set("cursor", *next)
+		q.Set("direction", "next")
+	}
 }
 
 // PutFile uploads the file at path to a presigned URL. contentType must be

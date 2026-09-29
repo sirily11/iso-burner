@@ -45,6 +45,7 @@ const (
 	uploadStageISO
 	uploadStageDrive
 	uploadStageReview
+	uploadStageConflicts
 	uploadStageRunning
 )
 
@@ -68,7 +69,8 @@ type uploadFiles struct {
 	offset  int             // first file shown on the review screen
 	err     error
 
-	run uploadRun // the upload, once started from the review screen
+	conflicts uploadConflicts // files the item already has, asked about before uploading
+	run       uploadRun       // the upload, once started from the review screen
 }
 
 // isoListMsg carries the files read from an ISO image.
@@ -135,6 +137,8 @@ func (m Model) updateUploadFiles(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateUploadRun(msg)
 	}
 	switch msg := msg.(type) {
+	case contentTitlesMsg:
+		return m.updateContentTitles(msg)
 	case scanDoneMsg:
 		if f.stage != uploadStageFolder || !f.loading || msg.folder != f.folder {
 			return m, nil
@@ -256,6 +260,9 @@ func (m Model) updateUploadFilesKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		f.iso, f.loading = chosen[0], true
 		return m, listISOCmd(f.iso)
 
+	case uploadStageConflicts:
+		return m.updateUploadConflictsKey(key)
+
 	case uploadStageDrive:
 		f.err = nil
 		var cmd tea.Cmd
@@ -274,7 +281,7 @@ func (m Model) updateUploadFilesKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case uploadStageReview:
 		switch key.String() {
 		case "enter":
-			return m.startUploadRun()
+			return m.checkUploadConflicts()
 		case "esc":
 			switch f.rule {
 			case ruleISO:
@@ -395,6 +402,11 @@ func (m Model) uploadFilesView() string {
 		}
 	case uploadStageReview:
 		b.WriteString(m.uploadReviewView())
+		if f.loading {
+			b.WriteString("\n" + dimStyle.Render("Checking which files the item already has…") + "\n")
+		}
+	case uploadStageConflicts:
+		b.WriteString(m.uploadConflictsView())
 	case uploadStageRunning:
 		b.WriteString(m.uploadRunView())
 	}
@@ -447,6 +459,8 @@ func (m Model) uploadFilesHelp() string {
 		return f.isoPicker.help()
 	case uploadStageDrive:
 		return f.drives.help() + " · esc: back"
+	case uploadStageConflicts:
+		return "↑/↓: choose · enter: select · r: replace · s: skip · R: replace all · S: skip all · esc: stop"
 	case uploadStageRunning:
 		return m.uploadRunHelp()
 	}

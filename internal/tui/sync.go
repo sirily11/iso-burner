@@ -305,7 +305,8 @@ func (m Model) reportUpload() {
 // uploadJob snapshots an upload to an item for rxstorage. Each file's row
 // goes from 0 to 1 over making and uploading its previews, as on screen.
 func (m Model) uploadJob() remote.Job {
-	f, r := m.uploadFiles, m.uploadFiles.run
+	r := m.uploadFiles.run
+	files := r.job.Files
 	item := m.itemSearch.chosen.Title
 	job := remote.Job{
 		Kind:       remote.KindUpload,
@@ -318,7 +319,7 @@ func (m Model) uploadJob() remote.Job {
 	failed, active := 0, 0
 	var overall float64
 	for i, s := range r.statuses {
-		size := f.matched[i].Size
+		size := files[i].Size
 		job.TotalBytes += size
 		job.DoneBytes += int64(s.Completion() * float64(size))
 		overall += s.Completion()
@@ -339,7 +340,7 @@ func (m Model) uploadJob() remote.Job {
 		if len(job.Tasks) == remote.MaxTasks {
 			break
 		}
-		s, file := r.statuses[i], f.matched[i]
+		s, file := r.statuses[i], files[i]
 		t := remote.Task{
 			Section:    remote.SectionFile,
 			Name:       truncate(path.Base(file.RelPath), 512),
