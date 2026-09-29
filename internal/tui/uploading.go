@@ -13,6 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sirily11/iso-burner/internal/remote"
+	"github.com/sirily11/iso-burner/internal/settings"
 	"github.com/sirily11/iso-burner/internal/upload"
 )
 
@@ -30,6 +31,7 @@ type uploadRun struct {
 	started    time.Time
 	elapsed    time.Duration
 	offset     int
+	skipped    int              // files not uploaded because the item already has them
 	err        error            // why the upload stopped early
 	sync       *remote.Reporter // nil unless upload progress is synced
 }
@@ -42,24 +44,31 @@ func uploadTick() tea.Cmd {
 	return tea.Tick(genTickInterval, func(time.Time) tea.Msg { return uploadTickMsg{} })
 }
 
-// startUploadRun uploads the reviewed files in the background.
-func (m Model) startUploadRun() (tea.Model, tea.Cmd) {
+// startUploadRun uploads the reviewed files in the background, leaving out
+// the ones skip is set for.
+func (m Model) startUploadRun(skip map[int]bool) (tea.Model, tea.Cmd) {
 	f := &m.uploadFiles
 	ctx, cancel := context.WithCancel(context.Background())
+	files := make([]settings.File, 0, len(f.matched))
+	for i, file := range f.matched {
+		if !skip[i] {
+			files = append(files, file)
+		}
+	}
 	job := upload.Job{
 		Client: m.sync,
 		ItemID: m.itemSearch.chosen.ID,
-		Files:  f.matched,
+		Files:  files,
 	}
 	if f.rule == ruleISO {
 		job.ISO = f.iso
 	} else {
 		job.Folder = f.folder
 	}
-	prog := upload.NewProgress(f.matched)
-	f.stage = uploadStageRunning
+	prog := upload.NewProgress(files)
+	f.stage, f.conflicts = uploadStageRunning, uploadConflicts{}
 	f.run = uploadRun{job: job, progress: prog, statuses: prog.Snapshot(), cancel: cancel, running: true, started: time.Now(),
-		sync: m.newReporter(remote.NewJobID())}
+		skipped: len(f.matched) - len(files), sync: m.newReporter(remote.NewJobID())}
 	m.reportUpload()
 	return m, tea.Batch(runUpload(ctx, job, prog), uploadTick())
 }
@@ -187,7 +196,8 @@ func uploadOrder(statuses []upload.FileStatus) []int {
 }
 
 func (m Model) uploadRunView() string {
-	f, r := m.uploadFiles, m.uploadFiles.run
+	r := m.uploadFiles.run
+	files := r.job.Files
 	var b strings.Builder
 	bar := progress.New(progress.WithDefaultGradient(), progress.WithoutPercentage(), progress.WithWidth(m.barWidth()))
 
@@ -210,19 +220,22 @@ func (m Model) uploadRunView() string {
 	case r.cancelling && r.running:
 		b.WriteString(errorStyle.Render("Cancelling… finishing the current step") + "\n")
 	case r.running:
-		b.WriteString(labelStyle.Render(fmt.Sprintf("Uploading %d file(s) to ", len(f.matched))) + item + "\n")
+		b.WriteString(labelStyle.Render(fmt.Sprintf("Uploading %d file(s) to ", len(files))) + item + "\n")
 	case r.err != nil:
 		b.WriteString(errorStyle.Render("✗ Upload stopped: "+r.err.Error()) + "\n")
 	case failed > 0:
 		b.WriteString(errorStyle.Render(fmt.Sprintf("✗ Uploaded %d of %d file(s); %d failed",
-			counts[upload.StageDone], len(f.matched), failed)) + dimStyle.Render("  (press r to retry them)") + "\n")
+			counts[upload.StageDone], len(files), failed)) + dimStyle.Render("  (press r to retry them)") + "\n")
 	default:
-		b.WriteString(okStyle.Render(fmt.Sprintf("✓ Uploaded %d file(s) to ", len(f.matched))) + item + "\n")
+		b.WriteString(okStyle.Render(fmt.Sprintf("✓ Uploaded %d file(s) to ", len(files))) + item + "\n")
 	}
 	b.WriteString(fmt.Sprintf("%s %3.0f%%  %d of %d files\n", bar.ViewAs(overall), overall*100,
 		counts[upload.StageDone]+failed, len(r.statuses)))
 	b.WriteString(dimStyle.Render(fmt.Sprintf("%d done · %d active · %d queued · %d retrying · %d failed · %s elapsed",
 		counts[upload.StageDone], active, counts[upload.StageQueued]-retrying, retrying, failed, r.elapsed.Round(time.Second))) + "\n")
+	if r.skipped > 0 {
+		b.WriteString(dimStyle.Render(fmt.Sprintf("%d file(s) skipped because the item already has them", r.skipped)) + "\n")
+	}
 	b.WriteString(dimStyle.Render("Item has "+m.contentCountLabel()) + "\n")
 	if line := m.syncStatusLine(r.sync); line != "" {
 		b.WriteString(line + "\n")
@@ -234,7 +247,7 @@ func (m Model) uploadRunView() string {
 	end := min(r.offset+uploadRows, len(order))
 	for _, i := range order[r.offset:end] {
 		s := r.statuses[i]
-		name := truncate(path.Base(f.matched[i].RelPath), nameWidth)
+		name := truncate(path.Base(files[i].RelPath), nameWidth)
 		var state string
 		switch s.Stage {
 		case upload.StageQueued:
@@ -297,5 +310,5 @@ func (m Model) UploadResult() (done, failed, total int, err error, ok bool) {
 			failed++
 		}
 	}
-	return done, failed, len(m.uploadFiles.matched), r.err, true
+	return done, failed, len(r.job.Files), r.err, true
 }

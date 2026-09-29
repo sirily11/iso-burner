@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -128,9 +129,12 @@ func newItemServer(t *testing.T, items []remote.Item) *itemServer {
 		}
 		if id, ok := strings.CutPrefix(r.URL.Path, "/api/v1/items/"); ok && r.Method == http.MethodGet {
 			s.mu.Lock()
-			n := len(s.contents[strings.TrimSuffix(id, "/contents")])
+			data := []any{}
+			for _, c := range s.contents[strings.TrimSuffix(id, "/contents")] {
+				data = append(data, map[string]any{"data": map[string]any{"title": c.Title}})
+			}
 			s.mu.Unlock()
-			json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"totalCount": n}})
+			json.NewEncoder(w).Encode(map[string]any{"data": data, "pagination": map[string]any{"totalCount": len(data)}})
 			return
 		}
 		if id, ok := strings.CutPrefix(r.URL.Path, "/api/v1/items/"); ok && r.Method == http.MethodPost {
@@ -431,7 +435,7 @@ func TestUploadRunsFromReview(t *testing.T) {
 		t.Fatalf("review should offer to upload:\n%s", m.View())
 	}
 
-	next, cmd := m.Update(enter)
+	next, cmd := startReviewed(t, m)
 	m = next.(Model)
 	if m.uploadFiles.stage != uploadStageRunning || !strings.Contains(m.View(), "Uploading 2 file(s) to") {
 		t.Fatalf("enter should start the upload:\n%s", m.View())
@@ -493,7 +497,7 @@ func TestUploadRunCtrlCStops(t *testing.T) {
 	m = send(t, m, key("1"))
 	m = pickFile(t, m, enter)
 	m = send(t, m, enter)
-	next, _ := m.Update(enter)
+	next, _ := startReviewed(t, m)
 	m = next.(Model)
 
 	m = send(t, m, tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -608,7 +612,7 @@ func TestUploadRetryFailedFiles(t *testing.T) {
 	m = send(t, m, key("1"))
 	m = pickFile(t, m, enter)
 	m = send(t, m, enter)
-	next, cmd := m.Update(enter)
+	next, cmd := startReviewed(t, m)
 	m = finishUpload(t, next.(Model), cmd)
 	view := m.View()
 	if !strings.Contains(view, "✗ Uploaded 1 of 2 file(s); 1 failed") || !strings.Contains(view, "press r to retry") ||
@@ -657,7 +661,7 @@ func TestUploadRunShowsRetryingFiles(t *testing.T) {
 	m = send(t, m, key("1"))
 	m = pickFile(t, m, enter)
 	m = send(t, m, enter)
-	next, _ := m.Update(enter)
+	next, _ := startReviewed(t, m)
 	m = next.(Model)
 	m.uploadFiles.run.statuses = []upload.FileStatus{{Stage: upload.StageQueued, Tries: 1, Err: errors.New("rxstorage: HTTP 503")}}
 	view := m.View()
@@ -695,7 +699,7 @@ func TestUploadShowsItemContentCount(t *testing.T) {
 		t.Fatalf("review should show the content count:\n%s", m.View())
 	}
 
-	next, cmd = m.Update(enter)
+	next, cmd = startReviewed(t, m)
 	m = next.(Model)
 	if !strings.Contains(m.View(), "Item has 3 content(s)") {
 		t.Fatalf("the upload should show the content count:\n%s", m.View())
@@ -724,5 +728,135 @@ func TestUploadDropsStaleContentCount(t *testing.T) {
 	m = send(t, m, itemContentsMsg{seq: m.itemSearch.countSeq, itemID: m.itemSearch.chosen.ID, count: 4})
 	if !strings.Contains(m.View(), "4 content(s) on this item") {
 		t.Fatalf("the latest count should be shown:\n%s", m.View())
+	}
+}
+
+// startReviewed presses enter on the review screen and delivers the item's
+// content titles, which starts the upload when the item has none of the files.
+func startReviewed(t *testing.T, m Model) (tea.Model, tea.Cmd) {
+	t.Helper()
+	next, cmd := m.Update(enter)
+	m = next.(Model)
+	if !m.uploadFiles.loading || !strings.Contains(m.View(), "Checking which files the item already has") {
+		t.Fatalf("enter should check the item's contents first:\n%s", m.View())
+	}
+	return m.Update(cmd())
+}
+
+// reviewFolder chooses root's files for item i1, whose contents are titled
+// existing, and returns the review screen.
+func reviewFolder(t *testing.T, root string, existing ...string) (Model, *itemServer) {
+	t.Helper()
+	m, server := openFileRulesOn(t, recent.Recent{Folder: root})
+	for _, title := range existing {
+		server.contents["i1"] = append(server.contents["i1"], remote.FileContent{Title: title})
+	}
+	m = send(t, m, key("1"))
+	m = pickFile(t, m, enter)
+	return send(t, m, enter), server
+}
+
+func titlesOf(contents []remote.FileContent) string {
+	var titles []string
+	for _, c := range contents {
+		titles = append(titles, c.Title)
+	}
+	sort.Strings(titles)
+	return strings.Join(titles, ",")
+}
+
+func TestUploadConflictsReplaceAndSkipEach(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"a.txt": 1, "b.txt": 2, "c.txt": 3})
+	m, server := reviewFolder(t, root, "a.txt", "b.txt")
+
+	next, cmd := startReviewed(t, m)
+	m = next.(Model)
+	view := m.View()
+	if cmd != nil || m.uploadFiles.stage != uploadStageConflicts || !strings.Contains(view, "2 of 3 file(s) are already on the item") ||
+		!strings.Contains(view, "File 1 of 2") || !strings.Contains(view, `already has content named "a.txt"`) ||
+		!strings.Contains(view, "R: replace all") {
+		t.Fatalf("files the item has should be asked about:\n%s", view)
+	}
+	m = send(t, m, key("s"))
+	if view := m.View(); !strings.Contains(view, "File 2 of 2") || !strings.Contains(view, `named "b.txt"`) ||
+		!strings.Contains(view, "So far: 0 to replace · 1 to skip") {
+		t.Fatalf("s should skip a.txt and ask about b.txt:\n%s", view)
+	}
+	next, cmd = m.Update(key("r"))
+	m = next.(Model)
+	if m.uploadFiles.stage != uploadStageRunning || !strings.Contains(m.View(), "Uploading 2 file(s) to") ||
+		!strings.Contains(m.View(), "1 file(s) skipped") {
+		t.Fatalf("deciding the last file should start the upload without the skipped one:\n%s", m.View())
+	}
+	m = finishUpload(t, m, cmd)
+	server.mu.Lock()
+	got := titlesOf(server.contents["i1"])
+	server.mu.Unlock()
+	if got != "a.txt,b.txt,b.txt,c.txt" { // the fake server appends rather than replaces
+		t.Fatalf("item contents = %s, want b.txt and c.txt uploaded", got)
+	}
+	if done, failed, total, _, ok := m.UploadResult(); !ok || done != 2 || failed != 0 || total != 2 {
+		t.Errorf("UploadResult = %d, %d, %d, %v", done, failed, total, ok)
+	}
+}
+
+func TestUploadConflictsAll(t *testing.T) {
+	for _, tc := range []struct {
+		key  string
+		want int // files uploaded
+	}{{"R", 3}, {"S", 1}} {
+		root := t.TempDir()
+		writeSizedFiles(t, root, map[string]int{"a.txt": 1, "b.txt": 2, "c.txt": 3})
+		m, _ := reviewFolder(t, root, "a.txt", "b.txt")
+		next, _ := startReviewed(t, m)
+		next, cmd := next.(Model).Update(key(tc.key))
+		m = next.(Model)
+		if m.uploadFiles.stage != uploadStageRunning || len(m.uploadFiles.run.job.Files) != tc.want {
+			t.Fatalf("%s: should upload %d file(s):\n%s", tc.key, tc.want, m.View())
+		}
+		finishUpload(t, m, cmd)
+	}
+}
+
+func TestUploadConflictsAllAfterOne(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"a.txt": 1, "b.txt": 2, "c.txt": 3})
+	m, _ := reviewFolder(t, root, "a.txt", "b.txt", "c.txt")
+	next, _ := startReviewed(t, m)
+	m = send(t, next.(Model), key("r"))
+	// Choose "Skip all" from the menu for the remaining two.
+	m = send(t, m, key("down"))
+	m = send(t, m, key("down"))
+	m = send(t, m, key("down"))
+	next, cmd := m.Update(enter)
+	m = next.(Model)
+	files := m.uploadFiles.run.job.Files
+	if m.uploadFiles.stage != uploadStageRunning || len(files) != 1 || files[0].RelPath != "a.txt" {
+		t.Fatalf("only the replaced file should upload, got %+v:\n%s", files, m.View())
+	}
+	finishUpload(t, m, cmd)
+}
+
+func TestUploadConflictsStop(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"a.txt": 1})
+	m, server := reviewFolder(t, root, "a.txt")
+	next, _ := startReviewed(t, m)
+	next, cmd := next.(Model).Update(key("esc"))
+	m = next.(Model)
+	if cmd != nil || m.uploadFiles.stage != uploadStageReview || !strings.Contains(m.View(), "enter: upload") {
+		t.Fatalf("esc should stop and go back to the review:\n%s", m.View())
+	}
+	server.mu.Lock()
+	n := len(server.contents["i1"])
+	server.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("stopping should upload nothing, item has %d contents", n)
+	}
+	// The review can start the upload again and ask again.
+	next, _ = startReviewed(t, m)
+	if next.(Model).uploadFiles.stage != uploadStageConflicts {
+		t.Fatal("uploading again should ask again")
 	}
 }

@@ -141,3 +141,30 @@ func TestCountItemContents(t *testing.T) {
 		t.Errorf("count = %d, path = %q, limit = %q", n, gotPath, gotLimit)
 	}
 }
+
+func TestListContentTitles(t *testing.T) {
+	var cursors []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/items/i1/contents" || r.URL.Query().Get("limit") != "100" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		cursor := r.URL.Query().Get("cursor")
+		cursors = append(cursors, cursor)
+		if cursor == "" {
+			w.Write([]byte(`{"data":[{"id":"c1","data":{"title":"a.jpg"}},{"id":"c2","data":{"title":"b.mp4"}}],
+				"pagination":{"nextCursor":"p2","hasNextPage":true,"totalCount":3}}`))
+			return
+		}
+		w.Write([]byte(`{"data":[{"id":"c3","data":{"title":"c.pdf"}}],"pagination":{"nextCursor":null,"hasNextPage":false,"totalCount":3}}`))
+	}))
+	defer srv.Close()
+
+	titles, err := NewClient(srv.URL, staticToken("tok")).ListContentTitles(context.Background(), "i1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(titles, ",") != "a.jpg,b.mp4,c.pdf" || strings.Join(cursors, ",") != ",p2" {
+		t.Errorf("titles = %v, cursors = %q", titles, cursors)
+	}
+}

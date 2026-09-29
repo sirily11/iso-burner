@@ -243,7 +243,7 @@ func TestUploadJobSnapshot(t *testing.T) {
 	m := New(Options{})
 	m.itemSearch.chosen = &remote.Item{ID: "i1", Title: "Trip"}
 	m.uploadFiles.matched = []settings.File{{RelPath: "a/clip.mp4", Size: 1000}, {RelPath: "b.jpg", Size: 100}, {RelPath: "c.jpg", Size: 10}}
-	m.uploadFiles.run = uploadRun{running: true, started: time.Now(), statuses: []upload.FileStatus{
+	m.uploadFiles.run = uploadRun{job: upload.Job{Files: m.uploadFiles.matched}, running: true, started: time.Now(), statuses: []upload.FileStatus{
 		{Stage: upload.StageDone},
 		{Stage: upload.StageFailed, Err: errors.New("boom")},
 		{Stage: upload.StageUploading, Kind: media.KindVideo, Fraction: 0.5},
