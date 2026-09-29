@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -133,42 +134,95 @@ func Duration(ctx context.Context, path string) (float64, error) {
 	return d, nil
 }
 
-// CompressVideo writes a small preview of the video at src to dst as H.264
-// MP4 at most 720 pixels wide with AAC audio, cut to the first
-// MaxPreviewSeconds. duration is the video length in seconds, used to report
-// progress from 0 to 1; progress may be nil.
-func CompressVideo(ctx context.Context, src, dst string, duration float64, progress func(float64)) error {
+type videoEncoder struct {
+	name        string
+	options     []string
+	pixelFormat string
+}
+
+// videoEncoders tries platform hardware encoders before the portable software
+// encoder. FFmpeg can list an encoder even when its matching GPU or driver is
+// unavailable, so a failed encode must be retried with the next one.
+func videoEncoders(goos string) []videoEncoder {
+	software := videoEncoder{"libx264", []string{"-preset", "fast", "-crf", "28"}, "yuv420p"}
+	switch goos {
+	case "darwin":
+		return []videoEncoder{
+			{"h264_videotoolbox", []string{"-allow_sw", "0", "-b:v", "1500k", "-maxrate", "2200k", "-bufsize", "4400k"}, "nv12"},
+			software,
+		}
+	case "windows":
+		return []videoEncoder{
+			{"h264_nvenc", []string{"-preset", "p4", "-cq", "28", "-b:v", "1500k", "-maxrate", "2200k", "-bufsize", "4400k"}, "nv12"},
+			{"h264_qsv", []string{"-preset", "fast", "-global_quality", "28"}, "nv12"},
+			{"h264_amf", []string{"-quality", "balanced", "-rc", "cqp", "-qp_i", "28", "-qp_p", "28"}, "nv12"},
+			software,
+		}
+	default:
+		return []videoEncoder{software}
+	}
+}
+
+func videoArgs(src, dst string, encoder videoEncoder) []string {
+	filter := fmt.Sprintf("scale='min(%d,iw)':-2,format=%s", previewWidth, encoder.pixelFormat)
 	args := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-y",
 		"-i", src,
 		"-t", strconv.Itoa(MaxPreviewSeconds),
 		// Subtitle and data streams often cannot be stored in MP4.
 		"-sn", "-dn",
-		"-vf", fmt.Sprintf("scale='min(%d,iw)':-2", previewWidth),
-		"-c:v", "libx264", "-preset", "fast", "-crf", "28",
+		"-vf", filter,
+		"-c:v", encoder.name,
+	}
+	args = append(args, encoder.options...)
+	args = append(args,
 		// 8-bit 4:2:0 plays everywhere, including 10-bit and 4:4:4 sources.
-		"-pix_fmt", "yuv420p",
+		"-pix_fmt", encoder.pixelFormat,
 		"-c:a", "aac", "-b:a", "96k",
 		"-movflags", "+faststart",
 		"-progress", "pipe:1", "-nostats",
 		dst,
-	}
+	)
+	return args
+}
+
+// CompressVideo writes a small preview of the video at src to dst as H.264
+// MP4 at most 720 pixels wide with AAC audio, cut to the first
+// MaxPreviewSeconds. Windows and macOS use a GPU encoder when one works and
+// fall back to libx264. duration reports progress from 0 to 1; progress may be nil.
+func CompressVideo(ctx context.Context, src, dst string, duration float64, progress func(float64)) error {
+	return compressVideo(ctx, src, dst, duration, progress, videoEncoders(runtime.GOOS), runFFmpeg)
+}
+
+func compressVideo(ctx context.Context, src, dst string, duration float64, progress func(float64), encoders []videoEncoder, run func(context.Context, []string, func(string)) error) error {
 	total := min(duration, MaxPreviewSeconds)
-	err := runFFmpeg(ctx, args, func(line string) {
-		if progress == nil || total <= 0 {
-			return
+	var last float64
+	var err error
+	for _, encoder := range encoders {
+		err = run(ctx, videoArgs(src, dst, encoder), func(line string) {
+			if progress == nil || total <= 0 {
+				return
+			}
+			if secs, ok := parseProgress(line); ok {
+				// A hardware attempt can fail after reporting progress. Keep the
+				// display monotonic and reserve 100% for a completed output.
+				if fraction := min(secs/total, 0.99); fraction > last {
+					last = fraction
+					progress(fraction)
+				}
+			}
+		})
+		if err == nil {
+			if progress != nil {
+				progress(1)
+			}
+			return nil
 		}
-		if secs, ok := parseProgress(line); ok {
-			progress(min(secs/total, 1))
-		}
-	})
-	if err != nil {
 		os.Remove(dst)
-		return fmt.Errorf("compress %s: %w", filepath.Base(src), err)
+		if ctx.Err() != nil {
+			break
+		}
 	}
-	if progress != nil {
-		progress(1)
-	}
-	return nil
+	return fmt.Errorf("compress %s: %w", filepath.Base(src), err)
 }
 
 // VideoThumbnail writes a JPEG of the frame one second into the video at src

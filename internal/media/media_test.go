@@ -55,6 +55,88 @@ func TestParseProgress(t *testing.T) {
 	}
 }
 
+func TestVideoEncoders(t *testing.T) {
+	for _, tc := range []struct {
+		goos string
+		want []string
+	}{
+		{"windows", []string{"h264_nvenc", "h264_qsv", "h264_amf", "libx264"}},
+		{"darwin", []string{"h264_videotoolbox", "libx264"}},
+		{"linux", []string{"libx264"}},
+	} {
+		encoders := videoEncoders(tc.goos)
+		if len(encoders) != len(tc.want) {
+			t.Fatalf("%s: got %d encoders, want %d", tc.goos, len(encoders), len(tc.want))
+		}
+		for i, encoder := range encoders {
+			if encoder.name != tc.want[i] {
+				t.Errorf("%s: encoder %d = %q, want %q", tc.goos, i, encoder.name, tc.want[i])
+			}
+		}
+	}
+	macArgs := videoArgs("clip.mov", "preview.mp4", videoEncoders("darwin")[0])
+	if i := indexOf(macArgs, "-allow_sw"); i < 0 || macArgs[i+1] != "0" {
+		t.Errorf("VideoToolbox must require hardware encoding: %v", macArgs)
+	}
+	if i := indexOf(macArgs, "-pix_fmt"); i < 0 || macArgs[i+1] != "nv12" {
+		t.Errorf("VideoToolbox must receive NV12 frames: %v", macArgs)
+	}
+}
+
+func TestCompressVideoFallsBackAfterPartialOutput(t *testing.T) {
+	dst := filepath.Join(t.TempDir(), "preview.mp4")
+	encoders := []videoEncoder{
+		{"h264_nvenc", nil, "nv12"},
+		{"libx264", nil, "yuv420p"},
+	}
+	var attempts []string
+	var progress []float64
+	run := func(_ context.Context, args []string, line func(string)) error {
+		name := args[1+indexOf(args, "-c:v")]
+		attempts = append(attempts, name)
+		if name == "h264_nvenc" {
+			if err := os.WriteFile(dst, []byte("partial"), 0o644); err != nil {
+				return err
+			}
+			line("out_time_us=800000")
+			return errors.New("GPU unavailable")
+		}
+		if _, err := os.Stat(dst); !os.IsNotExist(err) {
+			t.Errorf("partial output remains before software retry: %v", err)
+		}
+		line("out_time_us=500000")
+		return os.WriteFile(dst, []byte("complete"), 0o644)
+	}
+	if err := compressVideo(context.Background(), "clip.mov", dst, 1, func(f float64) {
+		progress = append(progress, f)
+	}, encoders, run); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(attempts, ",") != "h264_nvenc,libx264" {
+		t.Errorf("attempts = %v", attempts)
+	}
+	if len(progress) == 0 || progress[len(progress)-1] != 1 {
+		t.Errorf("progress = %v, want to finish at 1", progress)
+	}
+	for i := 1; i < len(progress); i++ {
+		if progress[i] < progress[i-1] {
+			t.Errorf("progress regressed: %v", progress)
+		}
+	}
+	if out, err := os.ReadFile(dst); err != nil || string(out) != "complete" {
+		t.Errorf("output = %q, %v", out, err)
+	}
+}
+
+func indexOf(args []string, value string) int {
+	for i, arg := range args {
+		if arg == value {
+			return i
+		}
+	}
+	return -1
+}
+
 func TestPrepareFileNeedsNoPreview(t *testing.T) {
 	p, err := Prepare(context.Background(), "notes.txt", t.TempDir(), nil)
 	if err != nil {
