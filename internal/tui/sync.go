@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"path"
 	"path/filepath"
+	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sirily11/iso-burner/internal/burn"
@@ -187,7 +189,7 @@ func (m Model) burnJob() remote.Job {
 	for _, d := range s.Drives {
 		t := remote.Task{
 			Section:    remote.SectionDrive,
-			Name:       d.Drive.Name(),
+			Name:       driveLetter(d.Drive.ID) + " · " + d.Drive.Name(),
 			Status:     string(d.State),
 			Progress:   driveFraction(d),
 			DoneBytes:  d.Progress,
@@ -212,6 +214,7 @@ func (m Model) burnJob() remote.Job {
 		task         remote.Task
 		done, copies int
 		fraction     float64
+		drives       []string // drives that burned a copy, in order
 	}
 	var order []string
 	rows := map[string]*isoRow{}
@@ -243,6 +246,9 @@ func (m Model) burnJob() remote.Job {
 		switch status {
 		case store.DiscDone:
 			row.done++
+			if id := driveLetter(d.DriveID); id != "" && !slices.Contains(row.drives, id) {
+				row.drives = append(row.drives, id)
+			}
 		case store.DiscBurning, store.DiscVerifying:
 			row.task.Status = "burning"
 		}
@@ -254,6 +260,9 @@ func (m Model) burnJob() remote.Job {
 		row := rows[path]
 		row.task.Progress = row.fraction / float64(row.copies)
 		row.task.Detail = fmt.Sprintf("%d of %d copies burned", row.done, row.copies)
+		if len(row.drives) > 0 {
+			row.task.Detail += " in " + strings.Join(row.drives, ", ")
+		}
 		if row.done == row.copies {
 			row.task.Status, row.task.Progress = "done", 1
 		}

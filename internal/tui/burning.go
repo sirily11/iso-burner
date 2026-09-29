@@ -411,23 +411,53 @@ func (m Model) burnProgressView() string {
 	}
 
 	if !s.Running {
-		var unverified []store.Disc
+		b.WriteString(m.burnedDiscsView())
+		unverified := 0
 		for _, d := range m.burnDiscs {
 			if d.Status == store.DiscDone && d.VerifyNote != "" {
-				unverified = append(unverified, d)
+				unverified++
 			}
 		}
-		if len(unverified) > 0 {
-			b.WriteString("\n" + errorStyle.Render(fmt.Sprintf("⚠ %d disc(s) burned but not verified", len(unverified))) + "\n")
-			for _, d := range unverified[:min(len(unverified), maxPreviewFiles)] {
-				b.WriteString(dimStyle.Render("  "+discLabel(&d)+" · "+truncate(d.VerifyNote, 60)) + "\n")
-			}
+		if unverified > 0 {
+			b.WriteString("\n" + errorStyle.Render(fmt.Sprintf("⚠ %d disc(s) burned but not verified", unverified)) + "\n")
 		} else if s.Done >= s.Total && s.Err == nil {
 			b.WriteString("\n" + okStyle.Render("Every disc was read back and matches its ISO.") + "\n")
 		}
 	}
 	if m.dbPath != "" {
 		b.WriteString("\n" + dimStyle.Render("Progress is saved in "+m.dbPath) + "\n")
+	}
+	return b.String()
+}
+
+// driveLetter shortens a drive ID for display: "E:" becomes "E".
+func driveLetter(id string) string {
+	return strings.TrimSuffix(id, ":")
+}
+
+// burnedDiscsView lists every finished disc with the drive that burned it,
+// so the user knows which ISO is in which drive.
+func (m Model) burnedDiscsView() string {
+	var done []store.Disc
+	width := 0
+	for _, d := range m.burnDiscs {
+		if d.Status == store.DiscDone {
+			done = append(done, d)
+			width = max(width, len(driveLetter(d.DriveID)))
+		}
+	}
+	if len(done) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n" + labelStyle.Render("Burned discs") + "\n")
+	for _, d := range done {
+		line := fmt.Sprintf("  %-*s  💿 %s", width, driveLetter(d.DriveID), discLabel(&d))
+		if d.VerifyNote != "" {
+			b.WriteString(line + "  " + errorStyle.Render("⚠ "+truncate(d.VerifyNote, 60)) + "\n")
+		} else {
+			b.WriteString(line + "  " + okStyle.Render("✓ verified") + "\n")
+		}
 	}
 	return b.String()
 }

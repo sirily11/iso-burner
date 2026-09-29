@@ -177,7 +177,7 @@ func TestBurnSyncsDrivesAndISOs(t *testing.T) {
 		t.Errorf("running report = %+v", job)
 	}
 	drive, isoRow := job.Tasks[0], job.Tasks[1]
-	if drive.Section != remote.SectionDrive || drive.Name != "PIONEER BD-RW BDR-XD07" || !strings.Contains(drive.Detail, "copy 1 of 2") {
+	if drive.Section != remote.SectionDrive || drive.Name != "1 · PIONEER BD-RW BDR-XD07" || !strings.Contains(drive.Detail, "copy 1 of 2") {
 		t.Errorf("drive row = %+v", drive)
 	}
 	if isoRow.Section != remote.SectionISO || isoRow.Name != "backup_1.iso" || isoRow.Detail != "0 of 2 copies burned" || isoRow.Status != "burning" {
@@ -202,7 +202,7 @@ func TestBurnSyncsDrivesAndISOs(t *testing.T) {
 	if job.Status != remote.StatusCompleted || job.DoneCount != 2 || job.Progress != 1 {
 		t.Errorf("final report = %+v", job)
 	}
-	if isoRow := job.Tasks[1]; isoRow.Status != "done" || isoRow.Detail != "2 of 2 copies burned" || isoRow.Progress != 1 {
+	if isoRow := job.Tasks[1]; isoRow.Status != "done" || isoRow.Detail != "2 of 2 copies burned in 1" || isoRow.Progress != 1 {
 		t.Errorf("final ISO row = %+v", isoRow)
 	}
 }
