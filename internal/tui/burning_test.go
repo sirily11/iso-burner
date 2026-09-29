@@ -154,7 +154,8 @@ func TestBurningShowsPerDriveProgressAndAsksForDiscs(t *testing.T) {
 	fake.release <- struct{}{}
 	m = tickUntil(t, m, "all done", func(m Model) bool { return !m.burnSnap.Running })
 	view = m.View()
-	for _, want := range []string{"✓ All 3 disc(s) burned", "3 of 3 disc(s) done", "Every disc was read back and matches its ISO"} {
+	for _, want := range []string{"✓ All 3 disc(s) burned", "3 of 3 disc(s) done", "Every disc was read back and matches its ISO",
+		"Burned discs", "💿 backup_1.iso · copy 1 of 3", "💿 backup_1.iso · copy 3 of 3"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("final view missing %q:\n%s", want, view)
 		}
