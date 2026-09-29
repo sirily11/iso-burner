@@ -40,6 +40,7 @@ type fakeServer struct {
 	files    []remote.FileContent
 	puts     map[string]put
 	titles   map[string]bool
+	replaced int
 	client   *remote.Client
 }
 
@@ -52,16 +53,20 @@ func newFakeServer(t *testing.T) *fakeServer {
 		switch {
 		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/upload/content-preview":
 			var req struct {
-				ItemID string                  `json:"item_id"`
-				Items  []remote.PreviewRequest `json:"items"`
+				ItemID    string                  `json:"item_id"`
+				Items     []remote.PreviewRequest `json:"items"`
+				Overwrite bool                    `json:"overwrite"`
 			}
 			json.NewDecoder(r.Body).Decode(&req)
 			var out []remote.PreviewUpload
 			for _, it := range req.Items {
 				if s.titles[it.Title] {
-					w.WriteHeader(http.StatusBadRequest)
-					fmt.Fprintf(w, `{"error":"Content with the same name already exists: %s"}`, it.Title)
-					return
+					if !req.Overwrite {
+						w.WriteHeader(http.StatusBadRequest)
+						fmt.Fprintf(w, `{"error":"Content with the same name already exists: %s"}`, it.Title)
+						return
+					}
+					s.replaced++
 				}
 				s.titles[it.Title] = true
 				s.previews = append(s.previews, it)
@@ -200,20 +205,15 @@ func TestRunFromFolder(t *testing.T) {
 	checkAllDone(t, p)
 	checkUploaded(t, s, files)
 
-	// Running again fails each image and video, since the item already has
-	// them, but carries on to the end.
+	// Running again replaces the images and videos the item already has
+	// rather than failing on them.
 	p = NewProgress(files)
 	if err := job.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
-	for i, st := range p.Snapshot() {
-		wantFail := media.KindOf(files[i].RelPath) != media.KindFile
-		if (st.Stage == StageFailed) != wantFail {
-			t.Errorf("%s: %s (%v)", files[i].RelPath, st.Label(), st.Err)
-		}
-		if wantFail && !strings.Contains(st.Err.Error(), "already exists") {
-			t.Errorf("%s: err = %v", files[i].RelPath, st.Err)
-		}
+	checkAllDone(t, p)
+	if s.replaced != 2 {
+		t.Errorf("replaced %d previews, want 2", s.replaced)
 	}
 }
 
