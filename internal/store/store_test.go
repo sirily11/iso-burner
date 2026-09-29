@@ -131,3 +131,44 @@ func TestUnfinishedAndResume(t *testing.T) {
 		t.Fatal("discarded session should not be resumable")
 	}
 }
+
+func TestSkipISOPreservesOtherDriveAndResume(t *testing.T) {
+	ctx := t.Context()
+	s, _ := open(t)
+	id, err := s.CreateSession(ctx, []Job{{Path: "/a.iso", Size: 10, Copies: 3}, {Path: "/b.iso", Size: 20, Copies: 1}}, drives)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, _ := s.Claim(ctx, id, "1")
+	b, _ := s.Claim(ctx, id, "2")
+	if n, err := s.SkipISO(ctx, a.ID); err != nil || n != 0 {
+		t.Fatalf("an unfailed disc must not be skipped: %d, %v", n, err)
+	}
+	s.FailDisc(ctx, a.ID, errors.New("bad disc"))
+	if n, err := s.SkipISO(ctx, a.ID); err != nil || n != 2 {
+		t.Fatalf("skip = %d, %v; want failed and pending copies", n, err)
+	}
+	other, err := s.Disc(ctx, b.ID)
+	if err != nil || other.Status != DiscAssigned || other.DriveID != "2" {
+		t.Fatalf("other drive's disc = %+v, %v", other, err)
+	}
+	// Stop/restart retains the skipped rows, their failure, and the counts.
+	if err := s.ReleaseDisc(ctx, a.ID, "stopped"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Resume(ctx, id, drives[:1]); err != nil {
+		t.Fatal(err)
+	}
+	sess, err := s.Session(ctx, id)
+	if err != nil || sess.Total != 4 || sess.Done != 0 || sess.Skipped != 2 {
+		t.Fatalf("resumed session = %+v, %v", sess, err)
+	}
+	skipped, _ := s.Disc(ctx, a.ID)
+	if skipped.Status != DiscSkipped || skipped.Error != "bad disc" {
+		t.Fatalf("skipped row after resume = %+v", skipped)
+	}
+	claimed, _ := s.Claim(ctx, id, "1")
+	if claimed.ID != b.ID {
+		t.Fatalf("resume should claim the other unfinished copy: %+v", claimed)
+	}
+}

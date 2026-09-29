@@ -94,6 +94,9 @@ func tickUntil(t *testing.T, m Model, what string, cond func(Model) bool) Model 
 // startBurnFlow picks the ISO in root, sets copies and confirms drives.
 func startBurnFlow(t *testing.T, m Model, copies string, driveKeys ...string) Model {
 	t.Helper()
+	if m.burnMenu {
+		m = send(t, m, enter) // Burn submenu
+	}
 	m = send(t, m, enter) // ISO picker
 	if copies != "" {
 		m = send(t, m, key(copies)) // opens the count dialog
@@ -221,6 +224,7 @@ func TestStopBurningAndResume(t *testing.T) {
 	// A new run offers to resume the saved session.
 	fake.release = nil
 	m = New(opts)
+	m = send(t, m, enter) // choose burning, then offer to resume
 	view := m.View()
 	for _, want := range []string{"Resume unfinished burn?", "backup_1.iso  0 of 2 disc(s) done", "0 of 2 disc(s) done · 2 left"} {
 		if !strings.Contains(view, want) {
@@ -257,6 +261,7 @@ func TestResumeDialogDiscardStartsNew(t *testing.T) {
 	st := testStore(t)
 	st.CreateSession(context.Background(), []store.Job{{Path: filepath.Join(root, "backup_1.iso"), Size: 3, Copies: 1}}, testDrives[:1])
 	m := New(Options{Mode: ModeBurn, Folder: root, ListDrives: fixedDrives(testDrives, nil), Store: st, Burner: newFakeBurner()})
+	m = send(t, m, enter)
 	if !strings.Contains(m.View(), "Resume unfinished burn?") {
 		t.Fatalf("expected resume dialog:\n%s", m.View())
 	}
@@ -266,5 +271,69 @@ func TestResumeDialogDiscardStartsNew(t *testing.T) {
 	}
 	if u, _ := st.Unfinished(context.Background()); u != nil {
 		t.Fatal("discarded session should be gone")
+	}
+}
+
+type failedISOBurner struct{ *fakeBurner }
+
+func (f failedISOBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, opts burn.BurnOptions) error {
+	if filepath.Base(iso) == "a.iso" {
+		return errors.New("write failed")
+	}
+	return f.fakeBurner.Burn(ctx, d, iso, size, opts)
+}
+
+func TestFailedBurnCanSkipISOAndContinue(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, "a.iso", "b.iso")
+	st := testStore(t)
+	m := New(Options{Mode: ModeBurn, Folder: root, ListDrives: fixedDrives(testDrives[:1], nil), Store: st, Burner: failedISOBurner{newFakeBurner()}})
+	m = send(t, m, enter) // Burn submenu
+	m = send(t, m, key("a"))
+	m = startBurnFlow(t, m, "", " ")
+	defer m.engine.Stop()
+	m = tickUntil(t, m, "failed ISO", func(m Model) bool { return strings.Contains(m.View(), "Last burn failed") })
+	if !strings.Contains(m.View(), "s: skip this ISO") || !strings.Contains(m.View(), "a.iso") {
+		t.Fatalf("failure must offer skipping the selected ISO:\n%s", m.View())
+	}
+	// The skip command also works after dismissing the insert dialog.
+	m = send(t, m, key("esc"))
+	m = send(t, m, key("s"))
+	m = tickUntil(t, m, "next ISO", func(m Model) bool {
+		return m.burnSnap.Skipped == 1 && strings.Contains(m.View(), "Next  b.iso")
+	})
+	if strings.Contains(m.View(), "Last burn failed") {
+		t.Fatal("next ISO must not display the previous failure")
+	}
+	m = send(t, m, enter)
+	m = tickUntil(t, m, "completion", func(m Model) bool { return !m.burnSnap.Running })
+	view := m.View()
+	for _, want := range []string{"1 disc(s) burned · 1 skipped", "1 of 2 disc(s) done · 1 skipped", "Skipped: a.iso"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("missing %q:\n%s", want, view)
+		}
+	}
+	if strings.Contains(view, "All 2 disc(s) burned") || strings.Contains(view, "Every disc was read back") {
+		t.Fatal("skipped discs must not be described as burned or verified")
+	}
+}
+
+func TestFailedBurnPromptsCanChooseDrive(t *testing.T) {
+	m := Model{dismissed: map[string]int64{}, burnSnap: burn.Snapshot{Running: true, Total: 2, Drives: []burn.DriveStatus{
+		{Drive: testDrives[0], State: store.DriveWaiting, Disc: &store.Disc{ID: 1, ISOPath: "a.iso"}},
+		{Drive: testDrives[1], State: store.DriveWaiting, Disc: &store.Disc{ID: 2, ISOPath: "b.iso"}, Err: "bad disc"},
+	}}}
+	if m.promptDrive() != 1 {
+		t.Fatal("failed drive must be offered before a routine insert prompt")
+	}
+	next, _ := m.updateBurningKey(key("tab"))
+	m = next.(Model)
+	if m.promptDrive() != 0 {
+		t.Fatal("tab should select the other waiting drive")
+	}
+	next, _ = m.updateBurningKey(key("up"))
+	m = next.(Model)
+	if m.promptDrive() != 1 || !strings.Contains(m.burningView(), "s: skip this ISO") {
+		t.Fatal("up should return to the failed drive with its skip option")
 	}
 }

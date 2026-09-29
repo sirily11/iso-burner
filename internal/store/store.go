@@ -29,6 +29,8 @@ const (
 	DiscVerifying DiscStatus = "verifying"
 	// DiscDone discs are burned; Disc.VerifyNote says if they were not verified.
 	DiscDone DiscStatus = "done"
+	// DiscSkipped discs were omitted by the user and are not retried on resume.
+	DiscSkipped DiscStatus = "skipped"
 )
 
 // DriveState is what a drive is doing in a session.
@@ -66,8 +68,8 @@ type Session struct {
 	UpdatedAt time.Time
 	// DriveIDs are the drives the session last burned with, in order.
 	DriveIDs []string
-	// Total and Done count the session's discs.
-	Total, Done int
+	// Skipped discs are counted separately from successfully burned discs.
+	Total, Done, Skipped int
 }
 
 // Disc is one disc to burn: copy Copy of Copies from ISOPath.
@@ -271,8 +273,9 @@ func (s *Store) Session(ctx context.Context, id int64) (*Session, error) {
 	var created, updated int64
 	err := s.db.QueryRowContext(ctx, `SELECT status, created_at, updated_at,
 		(SELECT COUNT(*) FROM discs WHERE session_id = s.id),
+		(SELECT COUNT(*) FROM discs WHERE session_id = s.id AND status = ?),
 		(SELECT COUNT(*) FROM discs WHERE session_id = s.id AND status = ?)
-		FROM sessions s WHERE id = ?`, DiscDone, id).Scan(&sess.Status, &created, &updated, &sess.Total, &sess.Done)
+		FROM sessions s WHERE id = ?`, DiscDone, DiscSkipped, id).Scan(&sess.Status, &created, &updated, &sess.Total, &sess.Done, &sess.Skipped)
 	if err != nil {
 		return nil, err
 	}
@@ -380,10 +383,24 @@ func (s *Store) FailDisc(ctx context.Context, disc int64, cause error) error {
 	return err
 }
 
+// SkipISO skips a failed disc and any copies of its ISO still in the queue.
+// Copies already assigned to other drives continue on those drives.
+func (s *Store) SkipISO(ctx context.Context, disc int64) (int, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE discs SET status = ?, progress = 0, total = 0, finished_at = ?
+		WHERE session_id = (SELECT session_id FROM discs WHERE id = ? AND status = ? AND error != '')
+		AND iso_path = (SELECT iso_path FROM discs WHERE id = ?)
+		AND (id = ? OR status = ?)`, DiscSkipped, now(), disc, DiscAssigned, disc, disc, DiscPending)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
+}
+
 // ReleaseDisc puts a disc back in the queue, e.g. when burning is stopped.
 func (s *Store) ReleaseDisc(ctx context.Context, disc int64, reason string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE discs SET status = ?, drive_id = '', progress = 0, total = 0, error = ? WHERE id = ? AND status != ?`,
-		DiscPending, reason, disc, DiscDone)
+	_, err := s.db.ExecContext(ctx, `UPDATE discs SET status = ?, drive_id = '', progress = 0, total = 0, error = ? WHERE id = ? AND status NOT IN (?, ?)`,
+		DiscPending, reason, disc, DiscDone, DiscSkipped)
 	return err
 }
 

@@ -27,11 +27,19 @@ func TestModeSelection(t *testing.T) {
 
 	m = send(t, m, tea.KeyMsg{Type: tea.KeyDown})
 	m = send(t, m, enter)
-	if m.Mode() != ModeBurn || !strings.Contains(m.View(), "Choose ISO files to burn") {
-		t.Fatalf("down+enter should choose burn and open the ISO picker: mode=%d\n%s", m.Mode(), m.View())
+	if m.Mode() != ModeBurn || !strings.Contains(m.View(), "Verify disc against ISO") {
+		t.Fatalf("down+enter should choose the Burn submenu: mode=%d\n%s", m.Mode(), m.View())
 	}
 	if cfg, _ := m.Result(); cfg != nil {
 		t.Fatal("burn mode should not produce generate settings")
+	}
+	m = send(t, m, enter)
+	if !strings.Contains(m.View(), "Choose ISO files to burn") {
+		t.Fatalf("burn action should open the ISO picker:\n%s", m.View())
+	}
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyEsc})
+	if !m.burnMenu || m.cancelled {
+		t.Fatal("esc from ISO picker should return to the Burn submenu")
 	}
 	m = send(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 	if m.Mode() != ModeNone || m.cancelled {

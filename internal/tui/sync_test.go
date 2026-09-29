@@ -267,6 +267,24 @@ func TestStoppedBurnIsReported(t *testing.T) {
 	}
 }
 
+func TestBurnSyncReportsSkippedISOsSeparately(t *testing.T) {
+	m := Model{
+		burnSnap: burn.Snapshot{Total: 3, Done: 1, Skipped: 2},
+		syncDiscs: []store.Disc{
+			{ISOPath: "a.iso", ISOSize: 100, Status: store.DiscSkipped, Error: "bad disc"},
+			{ISOPath: "a.iso", ISOSize: 100, Status: store.DiscSkipped},
+			{ISOPath: "b.iso", ISOSize: 200, Status: store.DiscDone},
+		},
+	}
+	job := m.burnJob()
+	if job.Status != remote.StatusCompleted || job.DoneCount != 1 || job.TotalCount != 3 || job.Progress != 1 || job.DoneBytes != 200 {
+		t.Fatalf("skipped burn report = %+v", job)
+	}
+	if !strings.Contains(job.Message, "2 skipped") || job.Tasks[0].Status != "skipped" || job.Tasks[0].DoneBytes != 0 || job.Tasks[0].Detail != "0 of 2 copies burned · 2 skipped" {
+		t.Fatalf("skipped ISO report = %+v", job)
+	}
+}
+
 func waitUntil(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
