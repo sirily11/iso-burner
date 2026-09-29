@@ -122,7 +122,7 @@ func (c *Client) PutFile(ctx context.Context, putURL, path, contentType string, 
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode/100 != 2 {
 		slog.Error("rxstorage upload failed", "url", redactURL(putURL), "status", resp.StatusCode, "body", string(data))
-		return fmt.Errorf("upload: storage returned HTTP %d", resp.StatusCode)
+		return &StatusError{Code: resp.StatusCode, Storage: true}
 	}
 	return nil
 }

@@ -222,13 +222,13 @@ func (m Model) burnJob() remote.Job {
 			rows[d.ISOPath] = row
 			order = append(order, d.ISOPath)
 		}
-		status, progress, total := d.Status, d.Progress, d.Total
+		status, progress, total, discErr := d.Status, d.Progress, d.Total, d.Error
 		if l, ok := live[d.ID]; ok {
 			switch l.State {
 			case store.DriveBurning:
-				status, progress, total = store.DiscBurning, l.Progress, l.Total
+				status, progress, total, discErr = store.DiscBurning, l.Progress, l.Total, ""
 			case store.DriveVerifying:
-				status, progress, total = store.DiscVerifying, l.Progress, l.Total
+				status, progress, total, discErr = store.DiscVerifying, l.Progress, l.Total, ""
 			}
 		}
 		f := discFraction(status, progress, total)
@@ -246,8 +246,8 @@ func (m Model) burnJob() remote.Job {
 		case store.DiscBurning, store.DiscVerifying:
 			row.task.Status = "burning"
 		}
-		if d.Error != "" && status != store.DiscDone {
-			row.task.Error = d.Error
+		if discErr != "" && status != store.DiscDone {
+			row.task.Error = discErr
 		}
 	}
 	for _, path := range order {
@@ -351,9 +351,9 @@ func (m Model) uploadJob() remote.Job {
 		}
 		if s.Stage == upload.StageFailed {
 			t.DoneBytes = 0
-			if s.Err != nil {
-				t.Error = truncate(s.Err.Error(), 2048)
-			}
+		}
+		if s.Err != nil { // failed, or why it is being retried
+			t.Error = truncate(s.Err.Error(), 2048)
 		}
 		job.Tasks = append(job.Tasks, t)
 	}

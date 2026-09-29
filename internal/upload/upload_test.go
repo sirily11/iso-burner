@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -316,5 +317,196 @@ func TestRunUploadsFilesInParallel(t *testing.T) {
 	checkAllDone(t, p)
 	if len(got) != len(files) {
 		t.Errorf("uploaded %v, want %d files", got, len(files))
+	}
+}
+
+// flakyServer answers file content requests with the status fail returns for
+// each file's nth request, counting from 1, and 201 once it returns 0.
+func flakyServer(t *testing.T, fail func(file string, n int) int) (*remote.Client, func(file string) int) {
+	t.Helper()
+	var mu sync.Mutex
+	tries := map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Data remote.FileContent }
+		json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		tries[req.Data.FilePath]++
+		n := tries[req.Data.FilePath]
+		mu.Unlock()
+		if code := fail(req.Data.FilePath, n); code != 0 {
+			w.WriteHeader(code)
+			return
+		}
+		w.WriteHeader(http.StatusCreated)
+	}))
+	t.Cleanup(srv.Close)
+	return remote.NewClient(srv.URL, testToken{}), func(file string) int {
+		mu.Lock()
+		defer mu.Unlock()
+		return tries[file]
+	}
+}
+
+func TestRunRetriesFailedFiles(t *testing.T) {
+	files := []settings.File{{RelPath: "flaky.txt", Size: 1}, {RelPath: "gone.txt", Size: 1}, {RelPath: "ok.txt", Size: 1}}
+	client, tries := flakyServer(t, func(file string, n int) int {
+		switch {
+		case file == "flaky.txt" && n < 3:
+			return http.StatusServiceUnavailable // passes on the last try
+		case file == "gone.txt":
+			return http.StatusBadGateway // never passes
+		}
+		return 0
+	})
+	p := NewProgress(files)
+	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, Workers: 1, RetryDelay: -1}
+	if err := job.Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	st := p.Snapshot()
+	if st[0].Stage != StageDone || st[0].Err != nil || st[0].Tries != 3 || tries("flaky.txt") != 3 {
+		t.Errorf("flaky file = %+v after %d tries, want done on the third", st[0], tries("flaky.txt"))
+	}
+	if st[1].Stage != StageFailed || st[1].Tries != DefaultAttempts || tries("gone.txt") != DefaultAttempts ||
+		!strings.Contains(st[1].Err.Error(), "HTTP 502") {
+		t.Errorf("failing file = %+v after %d tries, want failed after %d", st[1], tries("gone.txt"), DefaultAttempts)
+	}
+	if st[2].Stage != StageDone || tries("ok.txt") != 1 {
+		t.Errorf("ok file = %+v after %d tries", st[2], tries("ok.txt"))
+	}
+}
+
+func TestRunRetriesAfterQueuedFiles(t *testing.T) {
+	files := []settings.File{{RelPath: "a.txt", Size: 1}, {RelPath: "b.txt", Size: 1}, {RelPath: "c.txt", Size: 1}}
+	var mu sync.Mutex
+	var order []string
+	client, _ := flakyServer(t, func(file string, n int) int {
+		mu.Lock()
+		order = append(order, fmt.Sprintf("%s#%d", file, n))
+		mu.Unlock()
+		if file == "a.txt" && n == 1 {
+			return http.StatusInternalServerError
+		}
+		return 0
+	})
+	p := NewProgress(files)
+	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, Workers: 1, RetryDelay: -1}
+	if err := job.Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	checkAllDone(t, p)
+	if got := strings.Join(order, " "); got != "a.txt#1 b.txt#1 c.txt#1 a.txt#2" {
+		t.Errorf("requests = %s, want the failed file tried again after the queued ones", got)
+	}
+}
+
+func TestRunDoesNotRetryRejectedFiles(t *testing.T) {
+	files := []settings.File{{RelPath: "dup.txt", Size: 1}}
+	client, tries := flakyServer(t, func(string, int) int { return http.StatusBadRequest })
+	p := NewProgress(files)
+	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, RetryDelay: -1}
+	if err := job.Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if st := p.Snapshot()[0]; st.Stage != StageFailed || tries("dup.txt") != 1 {
+		t.Errorf("rejected file = %+v after %d tries, want failed at once", st, tries("dup.txt"))
+	}
+}
+
+func TestRetryFailedRunsFailedFilesAgain(t *testing.T) {
+	files := []settings.File{{RelPath: "a.txt", Size: 1}, {RelPath: "b.txt", Size: 1}}
+	var down atomic.Bool
+	down.Store(true)
+	client, tries := flakyServer(t, func(file string, n int) int {
+		if file == "a.txt" && down.Load() {
+			return http.StatusServiceUnavailable
+		}
+		return 0
+	})
+	p := NewProgress(files)
+	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, Attempts: 2, RetryDelay: -1}
+	if err := job.Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	if st := p.Snapshot(); st[0].Stage != StageFailed || st[1].Stage != StageDone || p.Pending() != 0 {
+		t.Fatalf("statuses = %+v", st)
+	}
+	down.Store(false)
+
+	if n := p.RetryFailed(); n != 1 || p.Pending() != 1 {
+		t.Fatalf("RetryFailed queued %d, pending %d; want the one failed file", n, p.Pending())
+	}
+	if st := p.Snapshot()[0]; st.Stage != StageQueued || st.Tries != 0 {
+		t.Fatalf("retried file = %+v, want queued with fresh tries", st)
+	}
+	if err := job.Run(context.Background(), p); err != nil {
+		t.Fatal(err)
+	}
+	checkAllDone(t, p)
+	if tries("a.txt") != 3 || tries("b.txt") != 1 {
+		t.Errorf("tries a=%d b=%d; only the failed file should be sent again", tries("a.txt"), tries("b.txt"))
+	}
+}
+
+func TestRetryFailedWhileRunning(t *testing.T) {
+	files := []settings.File{{RelPath: "a.txt", Size: 1}, {RelPath: "slow.txt", Size: 1}}
+	release := make(chan struct{})
+	client, tries := flakyServer(t, func(file string, n int) int {
+		switch {
+		case file == "a.txt" && n == 1:
+			return http.StatusBadRequest
+		case file == "slow.txt":
+			<-release // keeps the run going until a.txt has been retried
+		}
+		return 0
+	})
+	p := NewProgress(files)
+	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, Workers: 2, RetryDelay: -1}
+	done := make(chan error)
+	go func() { done <- job.Run(context.Background(), p) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for p.Snapshot()[0].Stage != StageFailed {
+		if time.Now().After(deadline) {
+			t.Fatalf("a.txt never failed: %+v", p.Snapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if n := p.RetryFailed(); n != 1 {
+		t.Fatalf("RetryFailed = %d", n)
+	}
+	for p.Snapshot()[0].Stage != StageDone {
+		if time.Now().After(deadline) {
+			t.Fatalf("the running job should upload the retried file: %+v", p.Snapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	checkAllDone(t, p)
+	if tries("a.txt") != 2 {
+		t.Errorf("a.txt sent %d times, want 2", tries("a.txt"))
+	}
+}
+
+func TestRetryable(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{&remote.StatusError{Code: 503}, true},
+		{&remote.StatusError{Code: 429}, true},
+		{&remote.StatusError{Code: 400, Message: "exists"}, false},
+		{&remote.StatusError{Code: 403, Storage: true}, false},
+		{fmt.Errorf("wrap: %w", &remote.StatusError{Code: 500, Storage: true}), true},
+		{remote.ErrUnauthorized, false},
+		{fmt.Errorf("open: %w", os.ErrNotExist), false},
+		{context.Canceled, false},
+		{io.ErrUnexpectedEOF, true},
+	} {
+		if got := Retryable(tc.err); got != tc.want {
+			t.Errorf("Retryable(%v) = %v, want %v", tc.err, got, tc.want)
+		}
 	}
 }

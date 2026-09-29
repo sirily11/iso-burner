@@ -311,7 +311,11 @@ func (m Model) insertDialogView(d burn.DriveStatus) string {
 	}
 	if d.Err != "" {
 		b.WriteString(errorStyle.Render("✗ Last burn failed: "+truncate(d.Err, 70)) + "\n")
-		b.WriteString(dimStyle.Render("  That disc is unusable; the same image will be burned again.") + "\n")
+		if d.DiscUnused {
+			b.WriteString(dimStyle.Render("  Nothing was written to that disc. If it is blank, put it back in and try again.") + "\n")
+		} else {
+			b.WriteString(dimStyle.Render("  That disc is unusable; the same image will be burned again.") + "\n")
+		}
 	}
 	b.WriteString("\n" + labelStyle.Render("Next") + "  " + discLabel(d.Disc) + "  " + dimStyle.Render(settings.FormatBytes(d.Disc.ISOSize)) + "\n\n")
 	b.WriteString(selectedStyle.Render(fmt.Sprintf("Put a new blank disc in drive %s (%s), then press enter.", d.Drive.ID, d.Drive.Name())) + "\n")

@@ -193,12 +193,36 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte, logAr
 		var e struct {
 			Error string `json:"error"`
 		}
-		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			return nil, fmt.Errorf("rxstorage: %s (HTTP %d)", e.Error, resp.StatusCode)
-		}
-		return nil, fmt.Errorf("rxstorage: HTTP %d", resp.StatusCode)
+		json.Unmarshal(data, &e)
+		return nil, &StatusError{Code: resp.StatusCode, Message: e.Error}
 	}
 	return data, err
+}
+
+// StatusError is a request rxstorage or its storage answered with a non-2xx
+// HTTP status.
+type StatusError struct {
+	Code int
+	// Message is the server's reason, when it gave one.
+	Message string
+	// Storage is set when the storage bucket, not rxstorage, answered.
+	Storage bool
+}
+
+func (e *StatusError) Error() string {
+	switch {
+	case e.Storage:
+		return fmt.Sprintf("upload: storage returned HTTP %d", e.Code)
+	case e.Message != "":
+		return fmt.Sprintf("rxstorage: %s (HTTP %d)", e.Message, e.Code)
+	}
+	return fmt.Sprintf("rxstorage: HTTP %d", e.Code)
+}
+
+// Temporary reports whether the same request may succeed if sent again:
+// server errors, timeouts and rate limits, but not other client errors.
+func (e *StatusError) Temporary() bool {
+	return e.Code >= 500 || e.Code == http.StatusRequestTimeout || e.Code == http.StatusTooManyRequests
 }
 
 // NewJobID returns a random ID for a job that is never resumed.

@@ -2,14 +2,17 @@ package tui
 
 import (
 	"cmp"
+	"context"
 	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sirily11/iso-burner/internal/drive"
 	"github.com/sirily11/iso-burner/internal/iso"
 	"github.com/sirily11/iso-burner/internal/settings"
 )
@@ -22,11 +25,14 @@ const (
 	ruleFolder uploadRule = iota
 	// ruleISO uploads every file stored in an ISO image.
 	ruleISO
+	// ruleDisc uploads every file on the disc in a disc drive.
+	ruleDisc
 )
 
 var uploadRules = []modeChoice{
 	{title: "Files in a folder matching a regex", desc: "Pick a folder, then filter its files with a regex or glob"},
 	{title: "All files in an ISO", desc: "Pick an ISO image and upload everything stored in it"},
+	{title: "All files on a disc", desc: "Pick a disc drive and upload everything on the disc in it"},
 }
 
 // uploadStage is the screen shown once an item has been chosen.
@@ -37,6 +43,7 @@ const (
 	uploadStageFolder
 	uploadStagePattern
 	uploadStageISO
+	uploadStageDrive
 	uploadStageReview
 	uploadStageRunning
 )
@@ -50,9 +57,11 @@ type uploadFiles struct {
 	picker    folderPicker
 	isoPicker isoPicker
 	pattern   textinput.Model
+	drives    DriveSelector
 
-	folder  string // chosen folder, for ruleFolder
-	iso     string // chosen ISO image, for ruleISO
+	folder  string      // chosen folder, for ruleFolder, or where the disc is mounted for ruleDisc
+	iso     string      // chosen ISO image, for ruleISO
+	disc    drive.Drive // chosen drive, for ruleDisc
 	all     []settings.File
 	matched []settings.File // the files to upload
 	loading bool            // the folder is being scanned or the ISO read
@@ -73,6 +82,33 @@ func listISOCmd(path string) tea.Cmd {
 	return func() tea.Msg {
 		files, err := iso.ListFiles(path)
 		return isoListMsg{path: path, files: files, err: err}
+	}
+}
+
+// discFilesMsg carries the files on the disc in a drive and where the disc is
+// mounted.
+type discFilesMsg struct {
+	driveID string
+	root    string
+	files   []settings.File
+	err     error
+}
+
+// listDiscCmd finds where the disc in d is mounted and lists its files.
+func (m Model) listDiscCmd(d drive.Drive) tea.Cmd {
+	discRoot := m.discRoot
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		root, err := discRoot(ctx, d)
+		if err != nil {
+			return discFilesMsg{driveID: d.ID, err: err}
+		}
+		files, err := settings.ScanFolder(root)
+		if err != nil {
+			err = fmt.Errorf("read disc at %s: %w", root, err)
+		}
+		return discFilesMsg{driveID: d.ID, root: root, files: files, err: err}
 	}
 }
 
@@ -126,6 +162,26 @@ func (m Model) updateUploadFiles(msg tea.Msg) (tea.Model, tea.Cmd) {
 			f.stage, f.offset = uploadStageReview, 0
 		}
 		return m, nil
+	case discFilesMsg:
+		if f.stage != uploadStageDrive || !f.loading || msg.driveID != f.disc.ID {
+			return m, nil
+		}
+		f.loading = false
+		switch {
+		case msg.err != nil:
+			f.err = msg.err
+		case len(msg.files) == 0:
+			f.err = errors.New("the disc has no files")
+		default:
+			f.folder, f.all, f.matched = msg.root, msg.files, msg.files
+			f.stage, f.offset = uploadStageReview, 0
+		}
+		return m, nil
+	}
+	if f.stage == uploadStageDrive {
+		var cmd tea.Cmd
+		f.drives, cmd = f.drives.update(msg)
+		return m, cmd
 	}
 	if f.stage == uploadStagePattern {
 		var cmd tea.Cmd
@@ -200,14 +256,35 @@ func (m Model) updateUploadFilesKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		f.iso, f.loading = chosen[0], true
 		return m, listISOCmd(f.iso)
 
+	case uploadStageDrive:
+		f.err = nil
+		var cmd tea.Cmd
+		f.drives, cmd = f.drives.update(key)
+		switch {
+		case f.drives.Cancelled():
+			f.stage = uploadStageRule
+			return m, nil
+		case f.drives.Done():
+			f.disc, f.loading = f.drives.Selected()[0], true
+			f.drives.done = false // stay on the list if reading the disc fails
+			return m, m.listDiscCmd(f.disc)
+		}
+		return m, cmd
+
 	case uploadStageReview:
 		switch key.String() {
 		case "enter":
 			return m.startUploadRun()
 		case "esc":
-			if f.rule == ruleISO {
+			switch f.rule {
+			case ruleISO:
 				f.stage = uploadStageISO
 				return m, nil
+			case ruleDisc:
+				f.stage = uploadStageDrive
+				var cmd tea.Cmd
+				f.drives, cmd = f.drives.reopen() // the disc may have been swapped
+				return m, cmd
 			}
 			f.stage = uploadStagePattern
 			return m, f.pattern.Focus()
@@ -235,7 +312,7 @@ func (m Model) updateUploadRule(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		f.ruleIdx = (f.ruleIdx + len(uploadRules) - 1) % len(uploadRules)
 	case "down", "j", "tab":
 		f.ruleIdx = (f.ruleIdx + 1) % len(uploadRules)
-	case "1", "2":
+	case "1", "2", "3":
 		f.ruleIdx = int(key.Runes[0] - '1')
 		return m.chooseUploadRule()
 	case "enter":
@@ -257,6 +334,11 @@ func (m Model) chooseUploadRule() (tea.Model, tea.Cmd) {
 			f.isoPicker = newSingleISOPicker(m.isoHint)
 		}
 		return m, nil
+	}
+	if f.rule == ruleDisc {
+		f.stage = uploadStageDrive
+		f.drives = newSingleDriveSelector(m.listDrives)
+		return m, f.drives.Init()
 	}
 	f.stage = uploadStageFolder
 	f.picker = newFolderPickerAt(cmp.Or(f.folder, m.recent.Folder))
@@ -305,6 +387,11 @@ func (m Model) uploadFilesView() string {
 		if f.loading {
 			b.WriteString("\n" + dimStyle.Render("Reading ISO…") + "\n")
 		}
+	case uploadStageDrive:
+		b.WriteString(f.drives.body())
+		if f.loading {
+			b.WriteString("\n" + dimStyle.Render("Reading disc…") + "\n")
+		}
 	case uploadStageReview:
 		b.WriteString(m.uploadReviewView())
 	case uploadStageRunning:
@@ -324,9 +411,12 @@ func (m Model) uploadReviewView() string {
 		b.WriteString(labelStyle.Render(fmt.Sprintf("%-8s", k)) + " " + v + "\n")
 	}
 	row("Item", itemLabel(*m.itemSearch.chosen))
-	if f.rule == ruleISO {
+	switch f.rule {
+	case ruleISO:
 		row("ISO", f.iso)
-	} else {
+	case ruleDisc:
+		row("Disc", f.disc.Name()+"  "+dimStyle.Render(f.folder))
+	default:
 		row("Folder", f.folder)
 		row("Regex", cmp.Or(f.pattern.Value(), ".*"))
 	}
@@ -346,13 +436,15 @@ func (m Model) uploadFilesHelp() string {
 	f := m.uploadFiles
 	switch f.stage {
 	case uploadStageRule:
-		return "↑/↓: choose · 1-2 or enter: select · esc: choose another item · ctrl+c: quit"
+		return "↑/↓: choose · 1-3 or enter: select · esc: choose another item · ctrl+c: quit"
 	case uploadStageFolder:
 		return "↑/↓: move · →: open · ←: parent · enter: use highlighted · s: use this folder · .: hidden · esc: back"
 	case uploadStagePattern:
 		return "type: regex · enter: review files · esc: choose another folder · ctrl+c: quit"
 	case uploadStageISO:
 		return f.isoPicker.help()
+	case uploadStageDrive:
+		return f.drives.help() + " · esc: back"
 	case uploadStageRunning:
 		return m.uploadRunHelp()
 	}

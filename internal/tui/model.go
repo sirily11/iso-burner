@@ -68,6 +68,9 @@ type Options struct {
 	Mode Mode
 	// ListDrives finds disc drives for burn mode; nil uses drive.List.
 	ListDrives DriveLister
+	// DiscRoot finds where the disc in a drive is mounted, for uploading its
+	// files; nil uses drive.MountPoint.
+	DiscRoot func(context.Context, drive.Drive) (string, error)
 	// Store records burn sessions so they can be resumed; burning needs it.
 	Store *store.Store
 	// DBPath is shown so the user knows where progress is saved.
@@ -137,6 +140,7 @@ type Model struct {
 	burnJobs        []BurnJob
 
 	listDrives DriveLister
+	discRoot   func(context.Context, drive.Drive) (string, error)
 	drives     DriveSelector
 	burnDrives []drive.Drive
 
@@ -210,7 +214,7 @@ func New(opts Options) Model {
 	name.SetValue(cmp.Or(opts.ISOName, last.ISOName))
 
 	m := Model{mode: opts.Mode, folderInput: folder, patternInput: pattern, nameInput: name, outputDir: opts.OutputDir,
-		listDrives: opts.ListDrives, store: opts.Store, dbPath: opts.DBPath, burner: opts.Burner,
+		listDrives: opts.ListDrives, discRoot: opts.DiscRoot, store: opts.Store, dbPath: opts.DBPath, burner: opts.Burner,
 		auth: opts.Auth, authChecking: opts.Auth != nil,
 		sync: opts.Sync, syncInterval: opts.SyncInterval,
 		recent: last, recentPath: opts.RecentPath}
@@ -225,6 +229,9 @@ func New(opts Options) Model {
 	m.hostName, _ = os.Hostname()
 	if m.burner == nil {
 		m.burner = burn.System()
+	}
+	if m.discRoot == nil {
+		m.discRoot = drive.MountPoint
 	}
 	// Burn mode browses for ISOs, starting where they were most likely written.
 	m.isoHint = cmp.Or(opts.Folder, last.ISODir, opts.OutputDir)

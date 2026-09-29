@@ -107,6 +107,7 @@ type fakeBurner struct {
 	mu      sync.Mutex
 	discs   map[string][]byte
 	corrupt map[string]int // drive → number of burns to corrupt
+	reject  map[string]int // drive → number of burns to fail before writing
 	block   chan struct{}  // when set, burns wait on it or ctx
 	// closing, when set, holds a burn after every byte is sent, the way a
 	// drive still writes its buffer and closes the disc.
@@ -117,7 +118,7 @@ type fakeBurner struct {
 }
 
 func newFake() *fakeBurner {
-	return &fakeBurner{discs: map[string][]byte{}, corrupt: map[string]int{}}
+	return &fakeBurner{discs: map[string][]byte{}, corrupt: map[string]int{}, reject: map[string]int{}}
 }
 
 func (f *fakeBurner) Burn(ctx context.Context, d drive.Drive, iso string, size int64, opts BurnOptions) error {
@@ -129,6 +130,13 @@ func (f *fakeBurner) Burn(ctx context.Context, d drive.Drive, iso string, size i
 			return ctx.Err()
 		}
 	}
+	f.mu.Lock()
+	if f.reject[d.ID] > 0 {
+		f.reject[d.ID]--
+		f.mu.Unlock()
+		return errors.New("the BD-R disc is not blank")
+	}
+	f.mu.Unlock()
 	data, err := os.ReadFile(iso)
 	if err != nil {
 		return err
@@ -285,6 +293,38 @@ func TestEngineRetriesBadBurnOnSameDrive(t *testing.T) {
 	<-e.Done()
 	discs, _ := st.Discs(context.Background(), id)
 	if discs[0].Status != store.DiscDone || discs[0].Attempts != 2 || e.Snapshot().Drives[0].Err != "" {
+		t.Fatalf("disc after retry = %+v", discs[0])
+	}
+}
+
+func TestEngineClearsRejectedDiscErrorOnRetry(t *testing.T) {
+	drives := testDrives[:1]
+	st, id, _ := newSession(t, 1, drives)
+	fake := newFake()
+	fake.reject["1"] = 1
+	e, err := Start(Config{Store: st, Session: id, Drives: drives, Burner: fake, DiscsLoaded: true, OpenRetries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := waitFor(t, e, "retry prompt", func(s Snapshot) bool { return s.Drives[0].State == store.DriveWaiting })
+	if d := s.Drives[0]; !strings.Contains(d.Err, "not blank") || !d.DiscUnused {
+		t.Fatalf("after rejected disc = %+v", d)
+	}
+
+	// The error goes away as soon as the retry starts burning, both on
+	// screen and in the database that is synced to rxstorage.
+	fake.block = make(chan struct{})
+	e.Insert("1")
+	s = waitFor(t, e, "retry burning", func(s Snapshot) bool { return s.Drives[0].State == store.DriveBurning })
+	if d := s.Drives[0]; d.Err != "" || d.DiscUnused {
+		t.Fatalf("burning drive still shows the old error: %+v", d)
+	}
+	if discs, _ := st.Discs(context.Background(), id); discs[0].Error != "" {
+		t.Fatalf("burning disc still has the old error: %+v", discs[0])
+	}
+	close(fake.block)
+	<-e.Done()
+	if discs, _ := st.Discs(context.Background(), id); discs[0].Status != store.DiscDone || discs[0].Attempts != 2 {
 		t.Fatalf("disc after retry = %+v", discs[0])
 	}
 }

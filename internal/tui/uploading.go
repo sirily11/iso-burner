@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"path"
@@ -20,6 +21,7 @@ const uploadRows = 6
 
 // uploadRun is an upload of the reviewed files to the chosen item.
 type uploadRun struct {
+	job        upload.Job
 	progress   *upload.Progress
 	statuses   []upload.FileStatus
 	cancel     context.CancelFunc
@@ -56,11 +58,38 @@ func (m Model) startUploadRun() (tea.Model, tea.Cmd) {
 	}
 	prog := upload.NewProgress(f.matched)
 	f.stage = uploadStageRunning
-	f.run = uploadRun{progress: prog, statuses: prog.Snapshot(), cancel: cancel, running: true, started: time.Now(),
+	f.run = uploadRun{job: job, progress: prog, statuses: prog.Snapshot(), cancel: cancel, running: true, started: time.Now(),
 		sync: m.newReporter(remote.NewJobID())}
 	m.reportUpload()
-	run := func() tea.Msg { return uploadDoneMsg{err: job.Run(ctx, prog)} }
-	return m, tea.Batch(run, uploadTick())
+	return m, tea.Batch(runUpload(ctx, job, prog), uploadTick())
+}
+
+func runUpload(ctx context.Context, job upload.Job, prog *upload.Progress) tea.Cmd {
+	return func() tea.Msg { return uploadDoneMsg{err: job.Run(ctx, prog)} }
+}
+
+// retryUpload queues the failed files to be uploaded again. A running upload
+// picks them up after the files queued ahead of them; a finished one runs
+// again for just those files.
+func (m Model) retryUpload() (tea.Model, tea.Cmd) {
+	r := &m.uploadFiles.run
+	if r.cancelling || r.progress.RetryFailed() == 0 {
+		return m, nil
+	}
+	r.statuses = r.progress.Snapshot()
+	m.reportUpload()
+	if r.running {
+		return m, nil
+	}
+	return m, m.resumeUpload()
+}
+
+// resumeUpload runs the finished upload again for the files queued in it.
+func (m *Model) resumeUpload() tea.Cmd {
+	r := &m.uploadFiles.run
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel, r.running, r.err = cancel, true, nil
+	return tea.Batch(runUpload(ctx, r.job, r.progress), uploadTick())
 }
 
 // updateUploadRun handles progress and completion messages of the upload.
@@ -80,6 +109,11 @@ func (m Model) updateUploadRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 		r.cancel()
 		if r.cancelling {
 			m.cancelled = true
+		} else if msg.err == nil && r.progress.Pending() > 0 {
+			// Files were retried just as the upload finished.
+			cmd := m.resumeUpload()
+			m.reportUpload()
+			return m, cmd
 		}
 		m.reportUpload()
 		if m.cancelled {
@@ -108,6 +142,8 @@ func (m Model) updateUploadRunKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if !r.running {
 			return m, tea.Quit
 		}
+	case "r":
+		return m.retryUpload()
 	case "up", "k":
 		r.offset--
 	case "down", "j":
@@ -121,16 +157,20 @@ func (m Model) updateUploadRunKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// uploadOrder lists file indexes with active uploads first, then failed,
-// queued and finished ones, each group in upload order.
+// uploadOrder lists file indexes with active uploads first, then failed ones
+// and ones waiting to be retried, then queued and finished ones, each group
+// in upload order.
 func uploadOrder(statuses []upload.FileStatus) []int {
-	rank := func(s upload.Stage) int {
-		switch s {
+	rank := func(s upload.FileStatus) int {
+		switch s.Stage {
 		case upload.StageExtracting, upload.StagePreparing, upload.StageUploading:
 			return 0
 		case upload.StageFailed:
 			return 1
 		case upload.StageQueued:
+			if s.Err != nil {
+				return 1 // waiting to be retried
+			}
 			return 2
 		}
 		return 3
@@ -140,7 +180,7 @@ func uploadOrder(statuses []upload.FileStatus) []int {
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool {
-		return rank(statuses[order[a]].Stage) < rank(statuses[order[b]].Stage)
+		return rank(statuses[order[a]]) < rank(statuses[order[b]])
 	})
 	return order
 }
@@ -151,9 +191,13 @@ func (m Model) uploadRunView() string {
 	bar := progress.New(progress.WithDefaultGradient(), progress.WithoutPercentage(), progress.WithWidth(m.barWidth()))
 
 	counts := map[upload.Stage]int{}
+	retrying := 0
 	var overall float64
 	for _, s := range r.statuses {
 		counts[s.Stage]++
+		if s.Retrying() {
+			retrying++
+		}
 		overall += s.Completion()
 	}
 	overall /= float64(max(1, len(r.statuses)))
@@ -170,14 +214,14 @@ func (m Model) uploadRunView() string {
 		b.WriteString(errorStyle.Render("✗ Upload stopped: "+r.err.Error()) + "\n")
 	case failed > 0:
 		b.WriteString(errorStyle.Render(fmt.Sprintf("✗ Uploaded %d of %d file(s); %d failed",
-			counts[upload.StageDone], len(f.matched), failed)) + "\n")
+			counts[upload.StageDone], len(f.matched), failed)) + dimStyle.Render("  (press r to retry them)") + "\n")
 	default:
 		b.WriteString(okStyle.Render(fmt.Sprintf("✓ Uploaded %d file(s) to ", len(f.matched))) + item + "\n")
 	}
 	b.WriteString(fmt.Sprintf("%s %3.0f%%  %d of %d files\n", bar.ViewAs(overall), overall*100,
 		counts[upload.StageDone]+failed, len(r.statuses)))
-	b.WriteString(dimStyle.Render(fmt.Sprintf("%d done · %d active · %d queued · %d failed · %s elapsed",
-		counts[upload.StageDone], active, counts[upload.StageQueued], failed, r.elapsed.Round(time.Second))) + "\n")
+	b.WriteString(dimStyle.Render(fmt.Sprintf("%d done · %d active · %d queued · %d retrying · %d failed · %s elapsed",
+		counts[upload.StageDone], active, counts[upload.StageQueued]-retrying, retrying, failed, r.elapsed.Round(time.Second))) + "\n")
 	if line := m.syncStatusLine(r.sync); line != "" {
 		b.WriteString(line + "\n")
 	}
@@ -192,11 +236,20 @@ func (m Model) uploadRunView() string {
 		var state string
 		switch s.Stage {
 		case upload.StageQueued:
-			state = dimStyle.Render(s.Label())
+			if s.Retrying() {
+				attempts := cmp.Or(r.job.Attempts, upload.DefaultAttempts)
+				state = errorStyle.Render(fmt.Sprintf("↻ retry %d of %d: ", s.Tries+1, attempts)) +
+					dimStyle.Render(truncate(s.Err.Error(), 40))
+			} else {
+				state = dimStyle.Render(s.Label())
+			}
 		case upload.StageDone:
 			state = okStyle.Render("✓ " + s.Label())
 		case upload.StageFailed:
 			state = errorStyle.Render("✗ " + truncate(s.Err.Error(), 50))
+			if s.Tries > 1 {
+				state += dimStyle.Render(fmt.Sprintf(" (%d tries)", s.Tries))
+			}
 		default:
 			state = s.Label() + "…"
 		}
@@ -210,13 +263,20 @@ func (m Model) uploadRunView() string {
 
 func (m Model) uploadRunHelp() string {
 	r := m.uploadFiles.run
+	retry := ""
+	for _, s := range r.statuses {
+		if s.Stage == upload.StageFailed {
+			retry = " · r: retry failed"
+			break
+		}
+	}
 	switch {
 	case r.running && r.cancelling:
 		return "ctrl+c: force quit"
 	case r.running:
-		return "↑/↓: scroll · ctrl+c: stop"
+		return "↑/↓: scroll" + retry + " · ctrl+c: stop"
 	}
-	return "↑/↓: scroll · enter: exit"
+	return "↑/↓: scroll" + retry + " · enter: exit"
 }
 
 // UploadResult reports how an upload ended: how many files were uploaded and
