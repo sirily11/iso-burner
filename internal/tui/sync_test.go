@@ -16,10 +16,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sirily11/iso-burner/internal/auth"
+	"github.com/sirily11/iso-burner/internal/burn"
+	"github.com/sirily11/iso-burner/internal/drive"
 	"github.com/sirily11/iso-burner/internal/iso"
 	"github.com/sirily11/iso-burner/internal/media"
 	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/settings"
+	"github.com/sirily11/iso-burner/internal/store"
 	"github.com/sirily11/iso-burner/internal/upload"
 )
 
@@ -180,7 +183,7 @@ func TestBurnSyncsDrivesAndISOs(t *testing.T) {
 	if drive.Section != remote.SectionDrive || drive.Name != "1 · PIONEER BD-RW BDR-XD07" || !strings.Contains(drive.Detail, "copy 1 of 2") {
 		t.Errorf("drive row = %+v", drive)
 	}
-	if isoRow.Section != remote.SectionISO || isoRow.Name != "backup_1.iso" || isoRow.Detail != "0 of 2 copies burned" || isoRow.Status != "burning" {
+	if isoRow.Section != remote.SectionISO || isoRow.Name != "backup_1.iso" || isoRow.Detail != "0 of 2 copies burned · assigned to 1" || isoRow.Status != "burning" {
 		t.Errorf("ISO row = %+v", isoRow)
 	}
 	if id != m.burnJobID() {
@@ -204,6 +207,44 @@ func TestBurnSyncsDrivesAndISOs(t *testing.T) {
 	}
 	if isoRow := job.Tasks[1]; isoRow.Status != "done" || isoRow.Detail != "2 of 2 copies burned in 1" || isoRow.Progress != 1 {
 		t.Errorf("final ISO row = %+v", isoRow)
+	}
+}
+
+func TestBurnSyncsMatchingDriveLabelsAndLiveAssignments(t *testing.T) {
+	for _, state := range []store.DriveState{store.DriveWaiting, store.DriveBurning, store.DriveVerifying} {
+		t.Run(string(state), func(t *testing.T) {
+			server, client := newJobServer(t)
+			m := New(Options{Sync: client})
+			m.user = testUser
+			m.burnSync = m.newReporter("drive-labels")
+			m.burnSnap = burn.Snapshot{Running: true, Total: 2}
+			for i, id := range []string{"E:", "F:"} {
+				// Saved assignments may lag behind the live drive snapshot.
+				disc := store.Disc{ID: int64(i + 1), ISOPath: "backup_1.iso", ISOSize: 100,
+					Copy: i + 1, Copies: 2, Status: store.DiscPending, DriveID: "G:"}
+				m.syncDiscs = append(m.syncDiscs, disc)
+				m.burnSnap.Drives = append(m.burnSnap.Drives, burn.DriveStatus{
+					Drive: drive.Drive{ID: id, Vendor: "ASUS", Model: "BW-16D1HT"},
+					State: state, Disc: &disc, Progress: 50, Total: 100,
+				})
+			}
+			m.reportBurn()
+			if err := m.CloseSync(time.Second); err != nil {
+				t.Fatal(err)
+			}
+			_, job := server.last(t)
+			if len(job.Tasks) != 3 {
+				t.Fatalf("synced tasks = %+v, want two drives and one ISO", job.Tasks)
+			}
+			for i, label := range []string{"E · ASUS BW-16D1HT", "F · ASUS BW-16D1HT"} {
+				if row := job.Tasks[i]; row.Section != remote.SectionDrive || row.Name != label {
+					t.Errorf("synced drive = %+v, want label %q", row, label)
+				}
+			}
+			if row := job.Tasks[2]; row.Section != remote.SectionISO || row.Detail != "0 of 2 copies burned · assigned to E, F" {
+				t.Errorf("synced ISO = %+v, want live assignments to E and F", row)
+			}
+		})
 	}
 }
 

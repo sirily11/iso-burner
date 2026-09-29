@@ -375,9 +375,10 @@ func (m Model) burnProgressView() string {
 	}
 	b.WriteString("\n")
 
-	nameWidth := 0
+	driveWidth, nameWidth := 0, 0
 	for _, d := range s.Drives {
-		nameWidth = max(nameWidth, len(d.Drive.Name()))
+		driveWidth = max(driveWidth, len([]rune(driveLetter(d.Drive.ID))))
+		nameWidth = max(nameWidth, len([]rune(d.Drive.Name())))
 	}
 	nameWidth = min(nameWidth, 24)
 	for _, d := range s.Drives {
@@ -404,7 +405,7 @@ func (m Model) burnProgressView() string {
 			pct, state = 0, dimStyle.Render("stopped")
 		}
 		name := fmt.Sprintf("%-*s", nameWidth, truncate(d.Drive.Name(), nameWidth))
-		b.WriteString(fmt.Sprintf("  %s %s %3.0f%%  %s\n", name, bar.ViewAs(pct), pct*100, state))
+		b.WriteString(fmt.Sprintf("  %-*s · %s %s %3.0f%%  %s\n", driveWidth, driveLetter(d.Drive.ID), name, bar.ViewAs(pct), pct*100, state))
 		if d.Err != "" && d.State != store.DriveFinished {
 			b.WriteString("  " + errorStyle.Render("  ✗ "+truncate(d.Err, 80)) + "\n")
 		}
