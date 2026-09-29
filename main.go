@@ -121,7 +121,11 @@ func main() {
 	}
 	if m.Mode() == tui.ModePrinter {
 		if shared := m.SharedPrinters(); len(shared) > 0 {
-			fmt.Printf("Stopped advertising to iPhones and iPads: %s\nThe printers stay shared with other computers; run iso-burner again to use AirPrint.\n", strings.Join(shared, ", "))
+			if m.TemporaryPrinterSharing() {
+				fmt.Printf("Stopped AirPrint sharing: %s\nRun iso-burner again to share these printers.\n", strings.Join(shared, ", "))
+			} else {
+				fmt.Printf("Stopped advertising to iPhones and iPads: %s\nThe printers stay shared with other computers; run iso-burner again to use AirPrint.\n", strings.Join(shared, ", "))
+			}
 		}
 		os.Exit(0)
 	}
