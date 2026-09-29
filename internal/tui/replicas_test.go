@@ -15,6 +15,7 @@ func replicaModel(t *testing.T, names ...string) (Model, string) {
 	root := t.TempDir()
 	writeFiles(t, root, names...)
 	m := New(Options{Mode: ModeBurn, Folder: root, ListDrives: fixedDrives(testDrives, nil)})
+	m = send(t, m, enter)
 	m = send(t, m, key("a"))
 	m = send(t, m, enter)
 	if !m.settingReplicas {

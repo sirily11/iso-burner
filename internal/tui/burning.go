@@ -69,12 +69,8 @@ func (m Model) updateResume(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.resumeOffer = nil
 		return m, nil
 	case "esc", "q":
-		if m.modeChosen {
-			m.mode, m.resumeOffer = ModeNone, nil
-			return m, nil
-		}
-		m.cancelled = true
-		return m, tea.Quit
+		m.burnMenu, m.resumeOffer = true, nil
+		return m, nil
 	}
 	return m, nil
 }
@@ -86,7 +82,7 @@ func (m Model) resumeView() string {
 	b.WriteString(dimStyle.Render(fmt.Sprintf("Started %s · last activity %s",
 		s.CreatedAt.Format("2006-01-02 15:04"), s.UpdatedAt.Format("2006-01-02 15:04"))) + "\n\n")
 
-	type isoCount struct{ done, total int }
+	type isoCount struct{ done, skipped, total int }
 	var order []string
 	counts := map[string]*isoCount{}
 	for _, d := range m.resumeDiscs {
@@ -99,6 +95,8 @@ func (m Model) resumeView() string {
 		c.total++
 		if d.Status == store.DiscDone {
 			c.done++
+		} else if d.Status == store.DiscSkipped {
+			c.skipped++
 		}
 	}
 	for i, path := range order {
@@ -107,9 +105,14 @@ func (m Model) resumeView() string {
 			break
 		}
 		c := counts[path]
-		b.WriteString(fmt.Sprintf("  💿 %s  %s\n", filepath.Base(path), dimStyle.Render(fmt.Sprintf("%d of %d disc(s) done", c.done, c.total))))
+		counts := fmt.Sprintf("%d of %d disc(s) done", c.done, c.total)
+		if c.skipped > 0 {
+			counts += fmt.Sprintf(" · %d skipped", c.skipped)
+		}
+		b.WriteString(fmt.Sprintf("  💿 %s  %s\n", filepath.Base(path), dimStyle.Render(counts)))
 	}
-	b.WriteString("\n" + okStyle.Render(fmt.Sprintf("%d of %d disc(s) done · %d left", s.Done, s.Total, s.Total-s.Done)) + "\n")
+	summary := burnCounts(burn.Snapshot{Done: s.Done, Total: s.Total, Skipped: s.Skipped})
+	b.WriteString("\n" + okStyle.Render(fmt.Sprintf("%s · %d left", summary, s.Total-s.Done-s.Skipped)) + "\n")
 	if m.resumeErr != nil {
 		b.WriteString("\n" + errorStyle.Render("✗ "+m.resumeErr.Error()) + "\n")
 	}
@@ -117,11 +120,7 @@ func (m Model) resumeView() string {
 }
 
 func (m Model) resumeHelp() string {
-	esc := "esc: quit"
-	if m.modeChosen {
-		esc = "esc: back"
-	}
-	return "enter: resume · n: discard and start a new burn · " + esc
+	return "enter: resume · n: discard and start a new burn · esc: back"
 }
 
 // startBurning records the session in the database and starts burning with
@@ -171,9 +170,20 @@ func (m Model) startBurning() (tea.Model, tea.Cmd) {
 	return m, burnTick()
 }
 
-// promptDrive returns the index of the first drive waiting for a disc whose
-// dialog the user has not put off, or -1.
+// promptDrive returns the selected waiting drive, prioritising failures when
+// no drive is selected. Dismissed prompts are omitted.
 func (m Model) promptDrive() int {
+	for i, d := range m.burnSnap.Drives {
+		if d.Drive.ID == m.burnPrompt && d.State == store.DriveWaiting && d.Disc != nil && m.dismissed[d.Drive.ID] != d.Disc.ID {
+			return i
+		}
+	}
+	// Failed burns need a retry/skip decision before routine disc prompts.
+	for i, d := range m.burnSnap.Drives {
+		if d.Err != "" && d.State == store.DriveWaiting && d.Disc != nil && m.dismissed[d.Drive.ID] != d.Disc.ID {
+			return i
+		}
+	}
 	for i, d := range m.burnSnap.Drives {
 		if d.State == store.DriveWaiting && d.Disc != nil && m.dismissed[d.Drive.ID] != d.Disc.ID {
 			return i
@@ -226,6 +236,28 @@ func (m Model) updateBurningKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, tea.Quit
 	}
+	if running && key.String() == "s" {
+		i := m.promptDrive()
+		if i >= 0 && m.burnSnap.Drives[i].Err == "" {
+			return m, nil
+		}
+		if i < 0 {
+			i = -1
+			for n, d := range m.burnSnap.Drives {
+				if d.State == store.DriveWaiting && d.Err != "" && d.Disc != nil {
+					i = n
+					break
+				}
+			}
+		}
+		if i >= 0 {
+			d := m.burnSnap.Drives[i]
+			if m.engine.Skip(d.Drive.ID, d.Disc.ID) {
+				m.dismissed[d.Drive.ID] = d.Disc.ID
+			}
+		}
+		return m, nil
+	}
 	if i := m.promptDrive(); i >= 0 && running {
 		d := m.burnSnap.Drives[i]
 		switch key.String() {
@@ -235,6 +267,21 @@ func (m Model) updateBurningKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.dismissed[d.Drive.ID] = d.Disc.ID
 		case "esc":
 			m.dismissed[d.Drive.ID] = d.Disc.ID
+		case "tab", "down", "up":
+			step := 1
+			if key.String() == "up" {
+				step = -1
+			}
+			for n := 1; n < len(m.burnSnap.Drives); n++ {
+				j := (i + step*n + len(m.burnSnap.Drives)) % len(m.burnSnap.Drives)
+				next := m.burnSnap.Drives[j]
+				if next.State == store.DriveWaiting && next.Disc != nil {
+					m.dismissed[d.Drive.ID] = d.Disc.ID
+					delete(m.dismissed, next.Drive.ID)
+					m.burnPrompt = next.Drive.ID
+					break
+				}
+			}
 		}
 		return m, nil
 	}
@@ -272,8 +319,16 @@ func (m Model) burningView() string {
 		b.WriteString(m.stopDialogView())
 		b.WriteString("\n" + dimStyle.Render("y: stop · n/esc: keep burning"))
 	case i >= 0 && m.burnSnap.Running:
-		b.WriteString(m.insertDialogView(m.burnSnap.Drives[i]))
-		b.WriteString("\n" + dimStyle.Render("enter: disc inserted, start burning · esc: later"))
+		d := m.burnSnap.Drives[i]
+		b.WriteString(m.insertDialogView(d))
+		help := "enter: disc inserted, start burning"
+		if d.Err != "" {
+			help = "enter: retry with a blank disc · s: skip this ISO"
+		}
+		if m.waitingCount() > 1 {
+			help += " · tab/↑/↓: choose drive"
+		}
+		b.WriteString("\n" + dimStyle.Render(help+" · esc: later"))
 	default:
 		b.WriteString(m.burnProgressView())
 		b.WriteString("\n" + dimStyle.Render(m.burningHelp()))
@@ -293,7 +348,7 @@ func (m Model) stopDialogView() string {
 	if burning > 0 {
 		b.WriteString(fmt.Sprintf("%d disc(s) are being burned or checked and will be unusable.\n", burning))
 	}
-	b.WriteString(fmt.Sprintf("%d of %d disc(s) are done. Progress is saved, so you can\nresume later from burn mode.\n", m.burnSnap.Done, m.burnSnap.Total))
+	b.WriteString(fmt.Sprintf("%s. Progress is saved, so you can\nresume later from burn mode.\n", burnCounts(m.burnSnap)))
 	return b.String()
 }
 
@@ -316,6 +371,7 @@ func (m Model) insertDialogView(d burn.DriveStatus) string {
 		} else {
 			b.WriteString(dimStyle.Render("  That disc is unusable; the same image will be burned again.") + "\n")
 		}
+		b.WriteString(dimStyle.Render("  Press s to skip this ISO and its queued copies; other drives continue.") + "\n")
 	}
 	b.WriteString("\n" + labelStyle.Render("Next") + "  " + discLabel(d.Disc) + "  " + dimStyle.Render(settings.FormatBytes(d.Disc.ISOSize)) + "\n\n")
 	b.WriteString(selectedStyle.Render(fmt.Sprintf("Put a new blank disc in drive %s (%s), then press enter.", d.Drive.ID, d.Drive.Name())) + "\n")
@@ -358,17 +414,19 @@ func (m Model) burnProgressView() string {
 		b.WriteString(errorStyle.Render("✗ Burning stopped: "+s.Err.Error()) + "\n")
 	case s.Running:
 		b.WriteString(labelStyle.Render(fmt.Sprintf("Burning %d disc(s) with %d drive(s)", s.Total, len(s.Drives))) + "\n")
+	case s.Done+s.Skipped >= s.Total && s.Skipped > 0:
+		b.WriteString(okStyle.Render(fmt.Sprintf("Finished · %d disc(s) burned · %d skipped", s.Done, s.Skipped)) + "\n")
 	case s.Done >= s.Total:
 		b.WriteString(okStyle.Render(fmt.Sprintf("✓ All %d disc(s) burned", s.Total)) + "\n")
 	default:
 		b.WriteString(errorStyle.Render(fmt.Sprintf("Stopped with %d of %d disc(s) done", s.Done, s.Total)) + "\n")
 	}
-	overall := float64(s.Done)
+	overall := float64(s.Done + s.Skipped)
 	for _, d := range s.Drives {
 		overall += driveFraction(d)
 	}
 	overall = fraction(int64(overall*1000), int64(s.Total)*1000)
-	b.WriteString(fmt.Sprintf("%s %3.0f%%  %d of %d disc(s) done\n", bar.ViewAs(overall), overall*100, s.Done, s.Total))
+	b.WriteString(fmt.Sprintf("%s %3.0f%%  %s\n", bar.ViewAs(overall), overall*100, burnCounts(s)))
 	b.WriteString(dimStyle.Render(fmt.Sprintf("%s elapsed", m.burnElapsed.Round(time.Second))) + "\n")
 	if line := m.syncStatusLine(m.burnSync); line != "" {
 		b.WriteString(line + "\n")
@@ -413,6 +471,11 @@ func (m Model) burnProgressView() string {
 
 	if !s.Running {
 		b.WriteString(m.burnedDiscsView())
+		for _, d := range m.burnDiscs {
+			if d.Status == store.DiscSkipped {
+				b.WriteString("\n" + dimStyle.Render("Skipped: "+discLabel(&d)))
+			}
+		}
 		unverified := 0
 		for _, d := range m.burnDiscs {
 			if d.Status == store.DiscDone && d.VerifyNote != "" {
@@ -468,10 +531,23 @@ func (m Model) burningHelp() string {
 	case !m.burnSnap.Running:
 		return "enter: exit"
 	case m.waitingCount() > 0:
+		for _, d := range m.burnSnap.Drives {
+			if d.State == store.DriveWaiting && d.Err != "" {
+				return "enter: insert disc · s: skip failed ISO · ctrl+c: stop"
+			}
+		}
 		return "enter: insert disc · ctrl+c: stop"
 	default:
 		return "ctrl+c: stop (progress is saved)"
 	}
+}
+
+func burnCounts(s burn.Snapshot) string {
+	counts := fmt.Sprintf("%d of %d disc(s) done", s.Done, s.Total)
+	if s.Skipped > 0 {
+		counts += fmt.Sprintf(" · %d skipped", s.Skipped)
+	}
+	return counts
 }
 
 // BurnResult reports how burn mode ended: the final state of the session and

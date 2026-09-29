@@ -162,6 +162,7 @@ func TestBurnModeSelectsDrivesAfterISOs(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, "backup_1.iso")
 	m := New(Options{Mode: ModeBurn, Folder: root, ListDrives: fixedDrives(testDrives, nil), Store: testStore(t), Burner: newFakeBurner()})
+	m = send(t, m, enter)        // Burn submenu
 	m = send(t, m, enter)        // burn the highlighted ISO
 	next, cmd := m.Update(enter) // keep one copy
 	m = next.(Model)
@@ -224,6 +225,7 @@ func TestBurnModeCtrlCOnDrives(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, "backup_1.iso")
 	m := New(Options{Mode: ModeBurn, Folder: root, ListDrives: fixedDrives(testDrives, nil)})
+	m = send(t, m, enter) // Burn submenu
 	m = send(t, m, enter) // ISOs
 	m = send(t, m, enter) // copies
 	m = send(t, m, enter) // drives are still loading

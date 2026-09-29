@@ -161,7 +161,7 @@ func (m Model) reportBurn() {
 func discFraction(status store.DiscStatus, progress, total int64) float64 {
 	p := fraction(progress, total)
 	switch status {
-	case store.DiscDone:
+	case store.DiscDone, store.DiscSkipped:
 		return 1
 	case store.DiscBurning:
 		return p / 2
@@ -211,11 +211,11 @@ func (m Model) burnJob() remote.Job {
 	}
 
 	type isoRow struct {
-		task         remote.Task
-		done, copies int
-		fraction     float64
-		drives       []string // drives that burned a copy, in order
-		assigned     []string // drives currently holding an unfinished copy
+		task                  remote.Task
+		done, skipped, copies int
+		fraction              float64
+		drives                []string // drives that burned a copy, in order
+		assigned              []string // drives currently holding an unfinished copy
 	}
 	var order []string
 	rows := map[string]*isoRow{}
@@ -246,6 +246,9 @@ func (m Model) burnJob() remote.Job {
 		job.TotalBytes += d.ISOSize
 		burned := int64(f * 2 * float64(d.ISOSize)) // burning is the first half
 		burned = min(burned, d.ISOSize)
+		if status == store.DiscSkipped {
+			burned = 0
+		}
 		job.DoneBytes += burned
 		row.task.DoneBytes += burned
 		switch status {
@@ -254,6 +257,8 @@ func (m Model) burnJob() remote.Job {
 			if id := driveLetter(driveID); id != "" && !slices.Contains(row.drives, id) {
 				row.drives = append(row.drives, id)
 			}
+		case store.DiscSkipped:
+			row.skipped++
 		case store.DiscAssigned, store.DiscBurning, store.DiscVerifying:
 			if status != store.DiscAssigned {
 				row.task.Status = "burning"
@@ -270,6 +275,9 @@ func (m Model) burnJob() remote.Job {
 		row := rows[path]
 		row.task.Progress = row.fraction / float64(row.copies)
 		row.task.Detail = fmt.Sprintf("%d of %d copies burned", row.done, row.copies)
+		if row.skipped > 0 {
+			row.task.Detail += fmt.Sprintf(" · %d skipped", row.skipped)
+		}
 		if len(row.drives) > 0 {
 			row.task.Detail += " in " + strings.Join(row.drives, ", ")
 		}
@@ -278,6 +286,8 @@ func (m Model) burnJob() remote.Job {
 		}
 		if row.done == row.copies {
 			row.task.Status, row.task.Progress = "done", 1
+		} else if row.done+row.skipped == row.copies {
+			row.task.Status, row.task.Progress = "skipped", 1
 		}
 		job.Tasks = append(job.Tasks, row.task)
 	}
@@ -291,7 +301,7 @@ func (m Model) burnJob() remote.Job {
 		job.Title = fmt.Sprintf("Burn %s and %d more", filepath.Base(order[0]), len(order)-1)
 	}
 
-	overall := float64(s.Done)
+	overall := float64(s.Done + s.Skipped)
 	for _, d := range s.Drives {
 		overall += driveFraction(d)
 	}
@@ -307,11 +317,17 @@ func (m Model) burnJob() remote.Job {
 		}
 	case s.Err != nil:
 		job.Status, job.Error = remote.StatusFailed, s.Err.Error()
+	case s.Done+s.Skipped >= s.Total && s.Skipped > 0:
+		job.Status, job.Progress = remote.StatusCompleted, 1
+		job.Message = fmt.Sprintf("Finished: %d disc(s) burned; %d skipped", s.Done, s.Skipped)
 	case s.Done >= s.Total:
 		job.Status, job.Progress, job.Message = remote.StatusCompleted, 1, fmt.Sprintf("All %d disc(s) burned", s.Total)
 	default:
 		job.Status = remote.StatusStopped
 		job.Message = fmt.Sprintf("Stopped with %d of %d disc(s) done; resume from burn mode", s.Done, s.Total)
+		if s.Skipped > 0 {
+			job.Message += fmt.Sprintf("; %d skipped", s.Skipped)
+		}
 	}
 	job.FinishedAt = finishedAt(job.Status != remote.StatusRunning)
 	return job

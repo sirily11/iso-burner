@@ -70,6 +70,7 @@ func TestBurnRemembersISOs(t *testing.T) {
 	path := filepath.Join(root, "recent.json")
 
 	m := New(Options{Mode: ModeBurn, Folder: dir, RecentPath: path})
+	m = send(t, m, enter)
 	m = send(t, m, space)
 	m = send(t, m, space)
 	m = send(t, m, enter)

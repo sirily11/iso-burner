@@ -297,6 +297,75 @@ func TestEngineRetriesBadBurnOnSameDrive(t *testing.T) {
 	}
 }
 
+func TestEngineSkipsFailedISOAndQueuedCopies(t *testing.T) {
+	drives := testDrives[:1]
+	st, err := store.Open(filepath.Join(t.TempDir(), "burns.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	path, _ := writeISO(t, 2*verifyChunk)
+	next, data := writeISO(t, 4096)
+	id, err := st.CreateSession(t.Context(), []store.Job{
+		{Path: path, Size: 2 * verifyChunk, Copies: 3},
+		{Path: next, Size: int64(len(data)), Copies: 1},
+	}, drives)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := newFake()
+	fake.corrupt["1"] = 1
+	e, err := Start(Config{Store: st, Session: id, Drives: drives, Burner: fake, DiscsLoaded: true, OpenRetries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	s := waitFor(t, e, "failure", func(s Snapshot) bool { return s.Drives[0].State == store.DriveWaiting })
+	failed := s.Drives[0].Disc.ID
+	if e.Skip("nope", failed) || e.Skip("1", failed+1) || !e.Skip("1", failed) {
+		t.Fatal("skip must accept only the failed disc on its drive")
+	}
+	s = waitFor(t, e, "next ISO", func(s Snapshot) bool {
+		return s.Skipped == 3 && s.Drives[0].State == store.DriveWaiting && s.Drives[0].Disc.ISOPath == next
+	})
+	if s.Done != 0 || s.Drives[0].Err != "" || e.Skip("1", s.Drives[0].Disc.ID) || e.Skip("1", failed) {
+		t.Fatalf("next ISO should wait without the old failure: %+v", s)
+	}
+	// A stop and resume must retain the skips and claim only the next ISO.
+	e.Stop()
+	if err := st.Resume(t.Context(), id, drives); err != nil {
+		t.Fatal(err)
+	}
+	e, err = Start(Config{Store: st, Session: id, Drives: drives, Burner: fake, OpenRetries: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Stop()
+	waitFor(t, e, "resumed next ISO", func(s Snapshot) bool {
+		return s.Skipped == 3 && s.Drives[0].State == store.DriveWaiting && s.Drives[0].Disc.ISOPath == next
+	})
+	if !e.Insert("1") {
+		t.Fatal("next ISO should accept a blank disc")
+	}
+	waitFor(t, e, "completion", func(s Snapshot) bool { return !s.Running })
+	s = e.Snapshot()
+	if s.Err != nil || s.Done != 1 || s.Skipped != 3 || s.Total != 4 || fake.burns != 2 {
+		t.Fatalf("final snapshot = %+v; burns=%d", s, fake.burns)
+	}
+	discs, err := st.Discs(t.Context(), id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range discs[:3] {
+		if d.Status != store.DiscSkipped || d.FinishedAt.IsZero() {
+			t.Fatalf("skipped disc = %+v", d)
+		}
+	}
+	if u, err := st.Unfinished(t.Context()); err != nil || u != nil && u.ID == id {
+		t.Fatalf("completed queue should not offer a resume: %+v %v", u, err)
+	}
+}
+
 func TestEngineClearsRejectedDiscErrorOnRetry(t *testing.T) {
 	drives := testDrives[:1]
 	st, id, _ := newSession(t, 1, drives)

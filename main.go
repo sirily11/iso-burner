@@ -3,6 +3,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -169,19 +171,39 @@ func uploadSummary(m tui.Model) int {
 
 // burnSummary prints how burn mode ended and returns the exit code.
 func burnSummary(m tui.Model, dbPath string) int {
+	if result, ok := m.VerificationResult(); ok {
+		switch {
+		case errors.Is(result.Err, context.Canceled):
+			fmt.Println("Verification stopped; completeness has not been confirmed.")
+			return 130
+		case result.Err != nil:
+			fmt.Fprintln(os.Stderr, "disc verification failed:", result.Err)
+			return 1
+		default:
+			fmt.Println("Disc is complete and matches the ISO byte for byte.")
+			return 0
+		}
+	}
 	snap, stopped, ok := m.BurnResult()
 	if !ok {
 		fmt.Println("Cancelled.")
 		return 130
 	}
+	counts := fmt.Sprintf("%d of %d disc(s) done", snap.Done, snap.Total)
+	if snap.Skipped > 0 {
+		counts += fmt.Sprintf("; %d skipped", snap.Skipped)
+	}
 	switch {
 	case snap.Err != nil:
 		fmt.Fprintln(os.Stderr, "burning failed:", snap.Err)
-		fmt.Printf("%d of %d disc(s) done. Run burn mode again to resume.\n", snap.Done, snap.Total)
+		fmt.Printf("%s. Run burn mode again to resume.\n", counts)
 		return 1
-	case stopped || snap.Done < snap.Total:
-		fmt.Printf("Stopped with %d of %d disc(s) done. Run burn mode again to resume (progress saved in %s).\n", snap.Done, snap.Total, dbPath)
+	case stopped || snap.Done+snap.Skipped < snap.Total:
+		fmt.Printf("Stopped with %s. Run burn mode again to resume (progress saved in %s).\n", counts, dbPath)
 		return 130
+	case snap.Skipped > 0:
+		fmt.Printf("Finished: %d disc(s) burned, %d skipped.\n", snap.Done, snap.Skipped)
+		return 0
 	}
 	fmt.Printf("Burned %d disc(s).\n", snap.Total)
 	return 0

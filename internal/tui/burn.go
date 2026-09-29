@@ -10,16 +10,66 @@ import (
 	"github.com/sirily11/iso-burner/internal/drive"
 )
 
-// startBurn opens the ISO picker for burn mode, or first offers to resume an
-// unfinished session.
+// startBurn opens the burn/verify submenu.
 func (m Model) startBurn() (tea.Model, tea.Cmd) {
 	m.isoPicker = newISOPicker(m.isoHint)
 	m.isoPicker.preselect(m.recent.ISOs)
 	m.burnISOs, m.burnDrives = nil, nil
 	m.burnJobs, m.settingReplicas = nil, false
 	m.resuming, m.burnErr = nil, nil
-	m.offerResume()
+	m.burnMenu, m.burnAction = true, 0
+	m.verify = discVerification{}
 	return m, nil
+}
+
+func (m Model) updateBurnMenu(key tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch key.String() {
+	case "up", "down", "k", "j", "tab", "shift+tab":
+		m.burnAction = 1 - m.burnAction
+	case "1", "2", "b", "v", "enter":
+		if key.String() == "1" || key.String() == "b" {
+			m.burnAction = 0
+		} else if key.String() == "2" || key.String() == "v" {
+			m.burnAction = 1
+		}
+		if m.burnAction == 1 {
+			return m.startVerify()
+		}
+		m.burnMenu = false
+		m.offerResume()
+	case "esc", "q":
+		if m.modeChosen {
+			m.mode = ModeNone
+			return m, nil
+		}
+		m.cancelled = true
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
+func (m Model) burnMenuView() string {
+	var b strings.Builder
+	b.WriteString(titleStyle.Render("ISO Burner · Burn") + "\n\n")
+	choices := []struct{ title, detail string }{
+		{"Burn ISO files", "Write ISO images to blank discs and verify each burn"},
+		{"Verify disc against ISO", "Read an existing disc and check that it matches its ISO"},
+	}
+	for i, c := range choices {
+		line := fmt.Sprintf("%d. %s", i+1, c.title)
+		if i == m.burnAction {
+			line = selectedStyle.Render("› " + line)
+		} else {
+			line = "  " + line
+		}
+		b.WriteString(line + "\n     " + dimStyle.Render(c.detail) + "\n\n")
+	}
+	back := "esc: quit"
+	if m.modeChosen {
+		back = "esc: back"
+	}
+	b.WriteString(dimStyle.Render("↑/↓: move · enter: choose · 1/b: burn · 2/v: verify · " + back))
+	return panelStyle.Render(b.String()) + "\n"
 }
 
 // updateBurn handles burn mode: choosing ISO files, how many copies of each
@@ -29,9 +79,18 @@ func (m Model) updateBurn(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.engine != nil {
 		return m.updateBurning(msg)
 	}
+	if m.verify.choosing {
+		return m.updateVerify(msg)
+	}
 	if key, ok := msg.(tea.KeyMsg); ok && key.Type == tea.KeyCtrlC {
 		m.cancelled = true
 		return m, tea.Quit
+	}
+	if m.burnMenu {
+		if key, ok := msg.(tea.KeyMsg); ok {
+			return m.updateBurnMenu(key)
+		}
+		return m, nil
 	}
 	if m.burnISOs != nil || m.resuming != nil {
 		return m.updateDrives(msg)
@@ -59,12 +118,8 @@ func (m Model) updateBurn(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.settingReplicas = true
 		return m, nil
 	}
-	if m.modeChosen {
-		m.mode = ModeNone
-		return m, nil
-	}
-	m.cancelled = true
-	return m, tea.Quit
+	m.burnMenu = true
+	return m, nil
 }
 
 // updateReplicas handles the copies step. Confirming opens the drive
@@ -172,12 +227,18 @@ func (m Model) burnView() string {
 	if m.engine != nil {
 		return m.burningView()
 	}
+	if m.verify.choosing {
+		return m.verifyView()
+	}
+	if m.burnMenu {
+		return m.burnMenuView()
+	}
 	var b strings.Builder
 	b.WriteString(titleStyle.Render("ISO Burner · Burn") + "\n\n")
 	if m.burnISOs != nil || m.resuming != nil {
 		back := "esc: back to copies"
 		if m.resuming != nil {
-			left := m.resuming.Total - m.resuming.Done
+			left := m.resuming.Total - m.resuming.Done - m.resuming.Skipped
 			b.WriteString(dimStyle.Render(fmt.Sprintf("Resuming · %d of %d disc(s) left", left, m.resuming.Total)) + "\n")
 			b.WriteString(dimStyle.Render("You will be asked to insert a blank disc before each burn.") + "\n\n")
 			back = "esc: back"
@@ -206,11 +267,7 @@ func (m Model) burnView() string {
 	}
 	b.WriteString(m.isoPicker.view())
 	help := m.isoPicker.help()
-	if m.modeChosen {
-		help += " · esc: back"
-	} else {
-		help += " · esc: quit"
-	}
+	help += " · esc: back to Burn menu"
 	b.WriteString("\n" + dimStyle.Render(help))
 	return panelStyle.Render(b.String()) + "\n"
 }

@@ -138,9 +138,12 @@ type Model struct {
 	recent     recent.Recent
 	recentPath string
 
-	isoHint   string // where the ISO picker starts browsing
-	isoPicker isoPicker
-	burnISOs  []string
+	isoHint    string // where the ISO picker starts browsing
+	isoPicker  isoPicker
+	burnISOs   []string
+	burnMenu   bool
+	burnAction int
+	verify     discVerification
 
 	replicas        replicaEditor
 	settingReplicas bool           // the copies screen is showing instead of the ISO picker
@@ -170,6 +173,7 @@ type Model struct {
 	burnStopped bool
 	confirmStop bool
 	dismissed   map[string]int64 // drive ID → disc whose insert dialog was put off
+	burnPrompt  string           // drive whose insert dialog is selected
 
 	folderInput  textinput.Model
 	picker       folderPicker
@@ -259,7 +263,7 @@ func New(opts Options) Model {
 	if m.mode == ModeBurn {
 		m.isoPicker = newISOPicker(m.isoHint)
 		m.isoPicker.preselect(m.recent.ISOs)
-		m.offerResume()
+		m.burnMenu = true
 	}
 	if opts.Folder == "" {
 		// Nothing typed yet, so start by browsing for a folder, with the

@@ -43,9 +43,8 @@ type DriveStatus struct {
 // Snapshot is a point-in-time view of a whole session.
 type Snapshot struct {
 	Drives []DriveStatus
-	// Total and Done count every disc in the session, including those
-	// finished before it was resumed.
-	Total, Done int
+	// Counts include discs burned or skipped before the session was resumed.
+	Total, Done, Skipped int
 	// Running is false once every drive has stopped.
 	Running bool
 	// Err is a fatal error, such as the database failing.
@@ -75,17 +74,22 @@ type Config struct {
 // drive takes the next disc from the queue, burns it, reads it back to check
 // it, ejects it and then waits for the user to insert a new blank disc.
 type Engine struct {
-	cfg    Config
-	ctx    context.Context
-	cancel context.CancelFunc
-	insert []chan struct{}
-	wg     sync.WaitGroup
-	done   chan struct{}
+	cfg     Config
+	ctx     context.Context
+	cancel  context.CancelFunc
+	actions []chan driveAction
+	wg      sync.WaitGroup
+	done    chan struct{}
 
-	mu              sync.Mutex
-	drives          []DriveStatus
-	total, finished int
-	err             error
+	mu                       sync.Mutex
+	drives                   []DriveStatus
+	total, finished, skipped int
+	err                      error
+	actionPending            []bool
+}
+
+type driveAction struct {
+	skip bool
 }
 
 // Start begins burning in the background.
@@ -101,10 +105,11 @@ func Start(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("load session: %w", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	e := &Engine{cfg: cfg, ctx: ctx, cancel: cancel, done: make(chan struct{}), total: sess.Total, finished: sess.Done}
+	e := &Engine{cfg: cfg, ctx: ctx, cancel: cancel, done: make(chan struct{}), total: sess.Total, finished: sess.Done, skipped: sess.Skipped}
 	for _, d := range cfg.Drives {
 		e.drives = append(e.drives, DriveStatus{Drive: d, State: store.DriveIdle})
-		e.insert = append(e.insert, make(chan struct{}, 1))
+		e.actions = append(e.actions, make(chan driveAction, 1))
+		e.actionPending = append(e.actionPending, false)
 	}
 	for i := range cfg.Drives {
 		e.wg.Add(1)
@@ -121,14 +126,28 @@ func Start(cfg Config) (*Engine, error) {
 // Insert tells a waiting drive that a blank disc is in. It reports false when
 // the drive is not waiting for one.
 func (e *Engine) Insert(driveID string) bool {
+	return e.sendAction(driveID, 0, false)
+}
+
+// Skip omits the failed ISO and its queued copies, then asks for the next ISO.
+// discID prevents a stale prompt from skipping a different disc on this drive.
+func (e *Engine) Skip(driveID string, discID int64) bool {
+	return e.sendAction(driveID, discID, true)
+}
+
+func (e *Engine) sendAction(driveID string, discID int64, skip bool) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if e.ctx.Err() != nil {
+		return false
+	}
 	for i, d := range e.drives {
-		if d.Drive.ID == driveID && d.State == store.DriveWaiting {
-			select {
-			case e.insert[i] <- struct{}{}:
-			default:
+		if d.Drive.ID == driveID && d.State == store.DriveWaiting && !e.actionPending[i] {
+			if skip && (d.Disc == nil || d.Disc.ID != discID || d.Err == "") {
+				return false
 			}
+			e.actionPending[i] = true
+			e.actions[i] <- driveAction{skip: skip}
 			return true
 		}
 	}
@@ -149,7 +168,7 @@ func (e *Engine) Done() <-chan struct{} { return e.done }
 func (e *Engine) Snapshot() Snapshot {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	s := Snapshot{Total: e.total, Done: e.finished, Err: e.err, Drives: make([]DriveStatus, len(e.drives))}
+	s := Snapshot{Total: e.total, Done: e.finished, Skipped: e.skipped, Err: e.err, Drives: make([]DriveStatus, len(e.drives))}
 	select {
 	case <-e.done:
 	default:
@@ -186,10 +205,10 @@ func (e *Engine) fail(err error) {
 	e.cancel()
 }
 
-// finish marks the session done when every disc is burned.
+// finish marks the session done when every disc is burned or skipped.
 func (e *Engine) finish() {
 	e.mu.Lock()
-	complete := e.err == nil && e.finished >= e.total
+	complete := e.err == nil && e.finished+e.skipped >= e.total
 	e.mu.Unlock()
 	if complete {
 		if err := e.cfg.Store.SetSessionStatus(context.Background(), e.cfg.Session, store.SessionDone); err != nil {
@@ -207,6 +226,9 @@ func (e *Engine) setState(i int, state store.DriveState, disc *store.Disc, messa
 		id = disc.ID
 	}
 	e.update(i, func(s *DriveStatus) {
+		if state == store.DriveWaiting {
+			e.actionPending[i] = false
+		}
 		s.State, s.Progress, s.Total = state, 0, 0
 		if state != store.DriveBurning {
 			s.Speed = ""
@@ -259,7 +281,19 @@ func (e *Engine) run(i int) {
 				return
 			}
 			select {
-			case <-e.insert[i]:
+			case action := <-e.actions[i]:
+				if action.skip {
+					n, err := st.SkipISO(bg, disc.ID)
+					if err != nil {
+						e.fail(fmt.Errorf("skip ISO: %w", err))
+						return
+					}
+					e.mu.Lock()
+					e.skipped += n
+					e.drives[i].Err, e.drives[i].DiscUnused = "", false
+					e.mu.Unlock()
+					continue
+				}
 			case <-e.ctx.Done():
 				st.ReleaseDisc(bg, disc.ID, "")
 				e.setState(i, store.DriveIdle, nil, "stopped")

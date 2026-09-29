@@ -30,6 +30,7 @@ func TestISOPickerSelectsAllISOs(t *testing.T) {
 	writeFiles(t, root, "b_2.iso", "a_1.ISO", "notes.txt", "more/c_3.iso")
 
 	m := New(Options{Mode: ModeBurn, Folder: root})
+	m = send(t, m, enter)
 	view := m.View()
 	for _, want := range []string{"Choose ISO files to burn", "more", "a_1.ISO", "b_2.iso", "2 in this folder"} {
 		if !strings.Contains(view, want) {
@@ -76,6 +77,7 @@ func TestISOPickerEnterUsesHighlightedOrRequiresSelection(t *testing.T) {
 	writeFiles(t, root, "only.iso", "sub/x.txt")
 
 	m := New(Options{Mode: ModeBurn, Folder: root})
+	m = send(t, m, enter)
 	m = send(t, m, enter) // cursor on the "sub" folder, nothing selected
 	if m.BurnISOs() != nil || m.isoPicker.err == nil {
 		t.Fatal("enter with nothing selected should show an error")
