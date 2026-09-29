@@ -173,7 +173,7 @@ func (m Model) updateUploadRunKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func uploadOrder(statuses []upload.FileStatus) []int {
 	rank := func(s upload.FileStatus) int {
 		switch s.Stage {
-		case upload.StageExtracting, upload.StagePreparing, upload.StageUploading:
+		case upload.StageExtracting, upload.StagePreparing, upload.StageReady, upload.StageUploading:
 			return 0
 		case upload.StageFailed:
 			return 1
@@ -232,7 +232,7 @@ func (m Model) uploadRunView() string {
 	b.WriteString(fmt.Sprintf("%s %3.0f%%  %d of %d files\n", bar.ViewAs(overall), overall*100,
 		counts[upload.StageDone]+failed, len(r.statuses)))
 	b.WriteString(dimStyle.Render(fmt.Sprintf("%d done · %d active · %d queued · %d retrying · %d failed · %s elapsed",
-		counts[upload.StageDone], active, counts[upload.StageQueued]-retrying, retrying, failed, r.elapsed.Round(time.Second))) + "\n")
+		counts[upload.StageDone], active, counts[upload.StageQueued]+counts[upload.StageReady]-retrying, retrying, failed, r.elapsed.Round(time.Second))) + "\n")
 	if r.skipped > 0 {
 		b.WriteString(dimStyle.Render(fmt.Sprintf("%d file(s) skipped because the item already has them", r.skipped)) + "\n")
 	}

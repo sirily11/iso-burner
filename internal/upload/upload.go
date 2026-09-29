@@ -31,6 +31,7 @@ const (
 	StageQueued Stage = iota
 	StageExtracting
 	StagePreparing
+	StageReady
 	StageUploading
 	StageDone
 	StageFailed
@@ -64,6 +65,8 @@ func (s FileStatus) Label() string {
 			return "compressing"
 		}
 		return "making thumbnail"
+	case StageReady:
+		return "waiting to upload"
 	case StageUploading:
 		return "uploading"
 	case StageDone:
@@ -85,6 +88,8 @@ func (s FileStatus) Completion() float64 {
 		return 0.05
 	case StagePreparing:
 		return 0.1 + 0.7*s.Fraction
+	case StageReady:
+		return 0.8
 	case StageUploading:
 		return 0.8 + 0.2*s.Fraction
 	case StageDone, StageFailed:
@@ -225,9 +230,8 @@ func (p *Progress) setFraction(i int, v float64) {
 	p.update(i, func(f *FileStatus) { f.Fraction = v })
 }
 
-// DefaultWorkers is how many files a Job prepares and uploads at once when
-// Workers is not set: enough that uploads run while other files compress,
-// without running many ffmpeg processes side by side.
+// DefaultWorkers is the number of simultaneous preparations and the number
+// of simultaneous uploads when Workers is not set.
 const DefaultWorkers = 3
 
 // DefaultAttempts is how many times a Job tries each file when Attempts is
@@ -246,7 +250,8 @@ type Job struct {
 	Folder string
 	ISO    string
 	Files  []settings.File
-	// Workers is how many files are handled at once; DefaultWorkers if 0.
+	// Workers limits each stage independently: up to Workers files preparing
+	// and Workers files uploading at the same time; DefaultWorkers if 0.
 	Workers int
 	// Attempts is how many times a file is tried before it is marked failed;
 	// DefaultAttempts if 0. Only errors that may pass are tried again.
@@ -290,13 +295,15 @@ func (j Job) Run(ctx context.Context, p *Progress) error {
 
 	workers := cmp.Or(max(j.Workers, 0), DefaultWorkers)
 	attempts := cmp.Or(max(j.Attempts, 0), DefaultAttempts)
+	prepareSlots := make(chan struct{}, workers)
+	uploadSlots := make(chan struct{}, workers)
 	stop := context.AfterFunc(ctx, p.wake)
 	defer stop()
 
 	// Files are taken from the queue in order, so they start in the order
 	// listed, with files being tried again after them.
 	var wg sync.WaitGroup
-	for range min(workers, len(j.Files)) {
+	for range min(2*workers, len(j.Files)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -308,7 +315,7 @@ func (j Job) Run(ctx context.Context, p *Progress) error {
 				f := j.Files[i]
 				err := j.wait(ctx, st.Tries)
 				if err == nil {
-					err = j.upload(ctx, src, tmp, i, f, p)
+					err = j.upload(ctx, src, tmp, i, f, p, prepareSlots, uploadSlots)
 				}
 				switch {
 				case err == nil:
@@ -331,6 +338,21 @@ func (j Job) Run(ctx context.Context, p *Progress) error {
 		return context.Cause(ctx)
 	}
 	return nil
+}
+
+// runLimited holds one slot only for the work in its stage. Waiting for a
+// slot respects cancellation and does not appear as an active stage in p.
+func runLimited(ctx context.Context, slots chan struct{}, work func() error) error {
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+		if ctx.Err() != nil {
+			return context.Cause(ctx)
+		}
+		return work()
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
 }
 
 // wait pauses before a file's try when it has been tried before.
@@ -388,38 +410,52 @@ func needsFFmpeg(files []settings.File) bool {
 
 // upload adds file i to the item. Its title is the file name and its path the
 // one relative to the folder or ISO root.
-func (j Job) upload(ctx context.Context, src *source, tmp string, i int, f settings.File, p *Progress) error {
+func (j Job) upload(ctx context.Context, src *source, tmp string, i int, f settings.File, p *Progress, prepareSlots, uploadSlots chan struct{}) error {
 	name := path.Base(f.RelPath)
 	kind := media.KindOf(name)
 	if kind == media.KindFile {
-		p.setStage(i, StageUploading)
-		return j.Client.CreateFileContent(ctx, j.ItemID, remote.FileContent{
-			Title:    name,
-			MimeType: media.MimeType(name),
-			Size:     f.Size,
-			FilePath: f.RelPath,
+		return runLimited(ctx, uploadSlots, func() error {
+			p.setStage(i, StageUploading)
+			return j.Client.CreateFileContent(ctx, j.ItemID, remote.FileContent{
+				Title:    name,
+				MimeType: media.MimeType(name),
+				Size:     f.Size,
+				FilePath: f.RelPath,
+			})
 		})
 	}
 
-	local := filepath.Join(j.Folder, filepath.FromSlash(f.RelPath))
-	if src != nil {
-		p.setStage(i, StageExtracting)
-		local = filepath.Join(tmp, fmt.Sprintf("%d-%s", i, name))
-		if err := src.extract(f.RelPath, local); err != nil {
-			return err
+	var prev media.Preview
+	err := runLimited(ctx, prepareSlots, func() error {
+		local := filepath.Join(j.Folder, filepath.FromSlash(f.RelPath))
+		if src != nil {
+			p.setStage(i, StageExtracting)
+			local = filepath.Join(tmp, fmt.Sprintf("%d-%s", i, name))
+			if err := src.extract(f.RelPath, local); err != nil {
+				return err
+			}
+			defer os.Remove(local)
+		} else if _, err := os.Stat(local); err != nil {
+			return err // a missing file is not tried again
 		}
-		defer os.Remove(local)
-	} else if _, err := os.Stat(local); err != nil {
-		return err // a missing file is not tried again
-	}
 
-	p.setStage(i, StagePreparing)
-	prev, err := media.Prepare(ctx, local, tmp, func(v float64) { p.setFraction(i, v) })
+		p.setStage(i, StagePreparing)
+		var err error
+		prev, err = media.Prepare(ctx, local, tmp, func(v float64) { p.setFraction(i, v) })
+		return err
+	})
 	if err != nil {
 		return err
 	}
 	defer prev.Remove()
+	p.setStage(i, StageReady)
+	return runLimited(ctx, uploadSlots, func() error {
+		p.setStage(i, StageUploading)
+		return j.uploadPreview(ctx, i, f, name, kind, prev, p)
+	})
+}
 
+func (j Job) uploadPreview(ctx context.Context, i int, f settings.File, name string, kind media.Kind, prev media.Preview, p *Progress) error {
 	req := remote.PreviewRequest{
 		Filename: name,
 		Type:     kind.String(),
@@ -440,7 +476,6 @@ func (j Job) upload(ctx context.Context, src *source, tmp string, i int, f setti
 		return errors.New("rxstorage returned no upload URL for the preview video")
 	}
 
-	p.setStage(i, StageUploading)
 	parts := []struct{ url, file, contentType string }{{up.ImageURL, prev.Image, "image/jpeg"}}
 	if prev.Video != "" {
 		// The URL is signed for the original file's type, as the web
