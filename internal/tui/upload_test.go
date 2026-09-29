@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,10 +16,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sirily11/iso-burner/internal/auth"
+	"github.com/sirily11/iso-burner/internal/drive"
 	"github.com/sirily11/iso-burner/internal/iso"
 	"github.com/sirily11/iso-burner/internal/recent"
 	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/settings"
+	"github.com/sirily11/iso-burner/internal/upload"
 )
 
 func TestUploadModeSignedIn(t *testing.T) {
@@ -97,6 +100,8 @@ type itemServer struct {
 	queries  []string
 	contents map[string][]remote.FileContent // by item ID
 	jobs     []remote.Job
+	// reject lists file paths whose content is refused with HTTP 400.
+	reject map[string]bool
 }
 
 func (s *itemServer) lastJob(t *testing.T) remote.Job {
@@ -125,6 +130,11 @@ func newItemServer(t *testing.T, items []remote.Item) *itemServer {
 			var req struct{ Data remote.FileContent }
 			json.NewDecoder(r.Body).Decode(&req)
 			s.mu.Lock()
+			if s.reject[req.Data.FilePath] {
+				s.mu.Unlock()
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			s.contents[strings.TrimSuffix(id, "/contents")] = append(s.contents[strings.TrimSuffix(id, "/contents")], req.Data)
 			s.mu.Unlock()
 			w.WriteHeader(http.StatusCreated)
@@ -497,4 +507,155 @@ func TestUploadRunCtrlCStops(t *testing.T) {
 	if job := server.lastJob(t); job.Status != remote.StatusCancelled || job.FinishedAt == nil {
 		t.Errorf("stopped upload job = %+v, want cancelled", job)
 	}
+}
+
+// openDiscRules opens the upload screen with one fake drive whose disc is
+// mounted at root, or reports err when root is empty, and chooses the first item.
+func openDiscRules(t *testing.T, root string) Model {
+	t.Helper()
+	server := newItemServer(t, sampleItems)
+	svc := &fakeAuth{user: &auth.User{ID: "u1", Name: "Ada"}}
+	m := New(Options{Auth: svc, Sync: server.client,
+		ListDrives: func(context.Context) ([]drive.Drive, error) {
+			return []drive.Drive{{ID: "1", Vendor: "PIONEER", Model: "BD-RW"}}, nil
+		},
+		DiscRoot: func(_ context.Context, d drive.Drive) (string, error) {
+			if root == "" {
+				return "", drive.ErrNotMounted
+			}
+			return root, nil
+		},
+	})
+	m = run(t, m, checkAuthCmd(svc))
+	next, cmd := m.Update(key("3"))
+	m = run(t, next.(Model), cmd)
+	m = send(t, m, enter)
+	next, cmd = m.Update(key("3"))
+	m = run(t, next.(Model), cmd) // lists the drives
+	if m.uploadFiles.stage != uploadStageDrive || !strings.Contains(m.View(), "PIONEER BD-RW") {
+		t.Fatalf("3 should list the disc drives:\n%s", m.View())
+	}
+	return m
+}
+
+func TestUploadFilesFromDisc(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"videos/clip.mp4": 100, "readme.txt": 5})
+	m := openDiscRules(t, root)
+
+	m = pickFile(t, m, enter)
+	view := m.View()
+	if m.uploadFiles.stage != uploadStageReview || len(m.uploadFiles.matched) != 2 ||
+		!strings.Contains(view, "videos/clip.mp4") || !strings.Contains(view, "PIONEER BD-RW") {
+		t.Fatalf("choosing a drive should review every file on its disc:\n%s", view)
+	}
+	if m.uploadFiles.folder != root {
+		t.Fatalf("files should be read from the mounted disc: folder=%q", m.uploadFiles.folder)
+	}
+
+	next, cmd := m.Update(key("esc"))
+	m = run(t, next.(Model), cmd)
+	if m.uploadFiles.stage != uploadStageDrive || !strings.Contains(m.View(), "PIONEER BD-RW") {
+		t.Fatalf("esc should return to the drive list:\n%s", m.View())
+	}
+	m = send(t, m, key("esc"))
+	if m.uploadFiles.stage != uploadStageRule {
+		t.Fatalf("esc on the drive list should return to the rule choice: stage=%d", m.uploadFiles.stage)
+	}
+}
+
+func TestUploadFilesNoDisc(t *testing.T) {
+	m := openDiscRules(t, "")
+	m = pickFile(t, m, enter)
+	if m.uploadFiles.stage != uploadStageDrive || !errors.Is(m.uploadFiles.err, drive.ErrNotMounted) ||
+		!strings.Contains(m.View(), "✗") {
+		t.Fatalf("a drive without a disc should show an error and stay on the list:\n%s", m.View())
+	}
+}
+
+// finishUpload runs the upload commands in cmd and delivers their result.
+func finishUpload(t *testing.T, m Model, cmd tea.Cmd) Model {
+	t.Helper()
+	var done tea.Msg
+	for _, c := range cmd().(tea.BatchMsg) {
+		switch msg := c().(type) {
+		case uploadDoneMsg:
+			done = msg
+		default:
+			next, _ := m.Update(msg)
+			m = next.(Model)
+		}
+	}
+	if done == nil {
+		t.Fatal("the upload never finished")
+	}
+	next, _ := m.Update(done)
+	return next.(Model)
+}
+
+func TestUploadRetryFailedFiles(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"a.txt": 10, "b.txt": 20})
+	m, server := openFileRulesOn(t, recent.Recent{Folder: root})
+	server.reject = map[string]bool{"b.txt": true}
+	m = send(t, m, key("1"))
+	m = pickFile(t, m, enter)
+	m = send(t, m, enter)
+	next, cmd := m.Update(enter)
+	m = finishUpload(t, next.(Model), cmd)
+	view := m.View()
+	if !strings.Contains(view, "✗ Uploaded 1 of 2 file(s); 1 failed") || !strings.Contains(view, "press r to retry") ||
+		!strings.Contains(view, "r: retry failed") {
+		t.Fatalf("a failed file should be offered for retry:\n%s", view)
+	}
+
+	server.mu.Lock()
+	server.reject = nil
+	server.mu.Unlock()
+	next, cmd = m.Update(key("r"))
+	m = next.(Model)
+	if !m.uploadFiles.run.running || cmd == nil || !strings.Contains(m.View(), "Uploading 2 file(s) to") {
+		t.Fatalf("r should upload the failed file again:\n%s", m.View())
+	}
+	m = finishUpload(t, m, cmd)
+	if view := m.View(); !strings.Contains(view, "✓ Uploaded 2 file(s) to") || strings.Contains(view, "r: retry") {
+		t.Fatalf("the retried file should upload:\n%s", view)
+	}
+	server.mu.Lock()
+	got := server.contents["i1"]
+	server.mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("item i1 contents = %+v, want each file once", got)
+	}
+	if uploaded, failed, _, err, ok := m.UploadResult(); !ok || uploaded != 2 || failed != 0 || err != nil {
+		t.Errorf("UploadResult = %d, %d, %v, %v", uploaded, failed, err, ok)
+	}
+	if err := m.CloseSync(time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if job := server.lastJob(t); job.Status != remote.StatusCompleted || job.DoneCount != 2 {
+		t.Errorf("final upload job = %+v, want completed after the retry", job)
+	}
+
+	// With nothing failed, r does nothing.
+	if next, cmd = m.Update(key("r")); cmd != nil || next.(Model).uploadFiles.run.running {
+		t.Error("r with no failed files should not start an upload")
+	}
+}
+
+func TestUploadRunShowsRetryingFiles(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"a.txt": 10})
+	m, _ := openFileRulesOn(t, recent.Recent{Folder: root})
+	m = send(t, m, key("1"))
+	m = pickFile(t, m, enter)
+	m = send(t, m, enter)
+	next, _ := m.Update(enter)
+	m = next.(Model)
+	m.uploadFiles.run.statuses = []upload.FileStatus{{Stage: upload.StageQueued, Tries: 1, Err: errors.New("rxstorage: HTTP 503")}}
+	view := m.View()
+	if !strings.Contains(view, "↻ retry 2 of 3") || !strings.Contains(view, "HTTP 503") || !strings.Contains(view, "1 retrying") {
+		t.Fatalf("a file waiting to be retried should say so:\n%s", view)
+	}
+	m.uploadFiles.run.cancel()
 }

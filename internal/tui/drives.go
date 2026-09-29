@@ -28,6 +28,8 @@ type DriveSelector struct {
 	selected map[string]bool // by Drive.ID, so a rescan keeps the ticks
 	cursor   int
 	err      error
+	// single picks exactly one drive with enter instead of ticking several.
+	single bool
 
 	done      bool
 	cancelled bool
@@ -44,6 +46,14 @@ func NewDriveSelector(list DriveLister, preselect ...string) DriveSelector {
 	for _, id := range preselect {
 		s.selected[id] = true
 	}
+	return s
+}
+
+// newSingleDriveSelector builds a selector that picks one drive, e.g. the one
+// holding a disc to read.
+func newSingleDriveSelector(list DriveLister) DriveSelector {
+	s := NewDriveSelector(list)
+	s.single = true
 	return s
 }
 
@@ -120,6 +130,19 @@ func (s DriveSelector) update(msg tea.Msg) (DriveSelector, tea.Cmd) {
 		if s.loading || len(s.drives) == 0 {
 			return s, nil
 		}
+		if s.single {
+			switch msg.String() {
+			case "up", "k", "shift+tab":
+				s.cursor = (s.cursor + len(s.drives) - 1) % len(s.drives)
+			case "down", "j", "tab":
+				s.cursor = (s.cursor + 1) % len(s.drives)
+			case "enter":
+				clear(s.selected)
+				s.selected[s.drives[s.cursor].ID] = true
+				s.done = true
+			}
+			return s, nil
+		}
 		switch msg.String() {
 		case "up", "k", "shift+tab":
 			s.cursor = (s.cursor + len(s.drives) - 1) % len(s.drives)
@@ -175,7 +198,11 @@ func (s DriveSelector) reopen() (DriveSelector, tea.Cmd) {
 // body renders the drive list without the surrounding panel.
 func (s DriveSelector) body() string {
 	var b strings.Builder
-	b.WriteString(labelStyle.Render("Disc drives") + dimStyle.Render("  (each selected drive burns in parallel)") + "\n\n")
+	if s.single {
+		b.WriteString(labelStyle.Render("Disc drive") + dimStyle.Render("  (choose the drive holding the disc)") + "\n\n")
+	} else {
+		b.WriteString(labelStyle.Render("Disc drives") + dimStyle.Render("  (each selected drive burns in parallel)") + "\n\n")
+	}
 	switch {
 	case s.loading:
 		b.WriteString(dimStyle.Render("Looking for disc drives…") + "\n")
@@ -185,11 +212,14 @@ func (s DriveSelector) body() string {
 		b.WriteString(dimStyle.Render("No disc drives found. Connect a drive and press r to rescan.") + "\n")
 	default:
 		for i, d := range s.drives {
-			box := "[ ]"
-			if s.selected[d.ID] {
-				box = "[x]"
+			line := d.Name()
+			if !s.single {
+				box := "[ ]"
+				if s.selected[d.ID] {
+					box = "[x]"
+				}
+				line = box + " " + line
 			}
-			line := box + " " + d.Name()
 			if i == s.cursor {
 				line = selectedStyle.Render("› " + line)
 			} else {
@@ -197,7 +227,9 @@ func (s DriveSelector) body() string {
 			}
 			b.WriteString(line + "  " + dimStyle.Render(driveInfo(d)) + "\n")
 		}
-		b.WriteString("\n" + okStyle.Render(fmt.Sprintf("%d of %d drive(s) selected", len(s.selected), len(s.drives))) + "\n")
+		if !s.single {
+			b.WriteString("\n" + okStyle.Render(fmt.Sprintf("%d of %d drive(s) selected", len(s.selected), len(s.drives))) + "\n")
+		}
 		if s.err != nil {
 			b.WriteString("\n" + errorStyle.Render("✗ "+s.err.Error()) + "\n")
 		}
@@ -217,6 +249,9 @@ func driveInfo(d drive.Drive) string {
 func (s DriveSelector) help() string {
 	if s.loading || len(s.drives) == 0 {
 		return "r: rescan"
+	}
+	if s.single {
+		return "↑/↓: move · r: rescan · enter: read disc"
 	}
 	return "↑/↓: move · space: toggle · a: all/none · r: rescan · enter: confirm"
 }

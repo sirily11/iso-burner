@@ -346,14 +346,15 @@ func (s *Store) Claim(ctx context.Context, session int64, driveID string) (*Disc
 }
 
 // StartPhase moves a disc into burning or verifying with total bytes to go.
-// Starting to burn counts as a new attempt.
+// Starting to burn counts as a new attempt and clears the last attempt's
+// error.
 func (s *Store) StartPhase(ctx context.Context, disc int64, status DiscStatus, total int64) error {
-	inc := 0
 	if status == DiscBurning {
-		inc = 1
+		_, err := s.db.ExecContext(ctx, `UPDATE discs SET status = ?, progress = 0, total = ?, attempts = attempts + 1, error = '' WHERE id = ?`,
+			status, total, disc)
+		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE discs SET status = ?, progress = 0, total = ?, attempts = attempts + ? WHERE id = ?`,
-		status, total, inc, disc)
+	_, err := s.db.ExecContext(ctx, `UPDATE discs SET status = ?, progress = 0, total = ? WHERE id = ?`, status, total, disc)
 	return err
 }
 

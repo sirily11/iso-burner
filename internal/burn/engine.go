@@ -23,8 +23,13 @@ type DriveStatus struct {
 	Progress, Total int64
 	// Last is the disc this drive finished most recently, if any.
 	Last *store.Disc
-	// Err is why the last attempt failed, cleared once a burn succeeds.
+	// Err is why the last attempt failed, cleared when the next attempt
+	// starts.
 	Err string
+	// DiscUnused says the failed attempt was rejected before anything was
+	// written, e.g. the drive had not finished loading the disc, so the same
+	// disc can be put back in.
+	DiscUnused bool
 	// Completed counts the discs this drive finished in this run.
 	Completed int
 	// Speed is the write speed of the current burn, when the burner
@@ -205,6 +210,9 @@ func (e *Engine) setState(i int, state store.DriveState, disc *store.Disc, messa
 		s.State, s.Progress, s.Total = state, 0, 0
 		if state != store.DriveBurning {
 			s.Speed = ""
+		} else {
+			// A new attempt is under way, so the last failure is history.
+			s.Err, s.DiscUnused = "", false
 		}
 		s.Stage = ""
 		s.Disc = nil
@@ -276,8 +284,10 @@ func (e *Engine) run(i int) {
 				e.fail(err)
 				return
 			}
-			slog.Error("disc failed", "drive", d.ID, "disc", disc.ID, "iso", disc.ISOPath, "size", disc.ISOSize, "attempt", disc.Attempts, "err", err)
-			e.update(i, func(s *DriveStatus) { s.Err = err.Error() })
+			var unused *unusedError
+			isUnused := errors.As(err, &unused)
+			slog.Error("disc failed", "drive", d.ID, "disc", disc.ID, "iso", disc.ISOPath, "size", disc.ISOSize, "attempt", disc.Attempts, "unused", isUnused, "err", err)
+			e.update(i, func(s *DriveStatus) { s.Err, s.DiscUnused = err.Error(), isUnused })
 			e.cfg.Burner.Eject(bg, d)
 		}
 	}
@@ -287,6 +297,13 @@ func (e *Engine) run(i int) {
 type fatalError struct{ err error }
 
 func (f *fatalError) Error() string { return f.err.Error() }
+
+// unusedError is a burn that failed before a byte reached the disc, so the
+// disc is still blank and can be tried again.
+type unusedError struct{ err error }
+
+func (u *unusedError) Error() string { return u.err.Error() }
+func (u *unusedError) Unwrap() error { return u.err }
 
 // burnDisc burns, verifies and ejects one disc. A returned error means the
 // disc must be burned again, unless it is a *fatalError.
@@ -307,11 +324,12 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 		e.update(i, func(s *DriveStatus) { s.Stage = stage })
 	}
 	progress := e.progress(i, disc.ID)
-	sent := false
+	sent, wrote := false, false
 	opts := BurnOptions{
 		Speed: e.cfg.Speed,
 		Progress: func(n int64) {
 			progress(n)
+			wrote = wrote || n > 0
 			// Burners count the bytes handed to the drive, which still has
 			// to write its buffer and close the disc once they are all in.
 			if !sent && n >= disc.ISOSize {
@@ -328,6 +346,9 @@ func (e *Engine) burnDisc(i int, disc *store.Disc) error {
 	slog.Info("burn started", "drive", d.ID, "disc", disc.ID, "iso", disc.ISOPath, "size", disc.ISOSize, "attempt", disc.Attempts)
 	started := time.Now()
 	if err := e.cfg.Burner.Burn(e.ctx, d, disc.ISOPath, disc.ISOSize, opts); err != nil {
+		if !wrote {
+			return &unusedError{fmt.Errorf("burn: %w", err)}
+		}
 		return fmt.Errorf("burn: %w", err)
 	}
 	slog.Info("burn finished", "drive", d.ID, "disc", disc.ID, "took", time.Since(started).Round(time.Second))

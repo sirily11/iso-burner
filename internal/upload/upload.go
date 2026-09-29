@@ -6,14 +6,17 @@
 package upload
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/sirily11/iso-burner/internal/iso"
 	"github.com/sirily11/iso-burner/internal/media"
@@ -40,8 +43,16 @@ type FileStatus struct {
 	// Fraction is how far the current stage is, from 0 to 1, for stages that
 	// report it: compressing a video and uploading previews.
 	Fraction float64
-	Err      error
+	// Err is why the file failed, or why its last try failed while it waits
+	// in the queue to be tried again.
+	Err error
+	// Tries is how many times the file has been tried since it was queued.
+	Tries int
 }
+
+// Retrying reports whether the file is queued to be tried again after a
+// failed try.
+func (s FileStatus) Retrying() bool { return s.Stage == StageQueued && s.Err != nil }
 
 // Label says what is happening to the file.
 func (s FileStatus) Label() string {
@@ -59,6 +70,9 @@ func (s FileStatus) Label() string {
 		return "done"
 	case StageFailed:
 		return "failed"
+	}
+	if s.Retrying() {
+		return "queued to retry"
 	}
 	return "queued"
 }
@@ -79,18 +93,24 @@ func (s FileStatus) Completion() float64 {
 	return 0
 }
 
-// Progress records per-file upload progress. It is safe for concurrent use;
-// a nil *Progress ignores all updates.
+// Progress records per-file upload progress and holds the queue of files
+// still to upload. It is safe for concurrent use; a nil *Progress ignores
+// all updates.
 type Progress struct {
-	mu    sync.Mutex
-	files []FileStatus
+	mu      sync.Mutex
+	files   []FileStatus
+	queue   []int // files waiting to be uploaded, in order
+	active  int   // files taken from the queue and not yet finished
+	changed *sync.Cond
 }
 
-// NewProgress tracks files, all initially queued.
+// NewProgress tracks files, all initially queued in order.
 func NewProgress(files []settings.File) *Progress {
-	p := &Progress{files: make([]FileStatus, len(files))}
+	p := &Progress{files: make([]FileStatus, len(files)), queue: make([]int, len(files))}
+	p.changed = sync.NewCond(&p.mu)
 	for i, f := range files {
 		p.files[i].Kind = media.KindOf(f.RelPath)
+		p.queue[i] = i
 	}
 	return p
 }
@@ -103,6 +123,89 @@ func (p *Progress) Snapshot() []FileStatus {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return append([]FileStatus(nil), p.files...)
+}
+
+// Pending reports how many files are queued to upload.
+func (p *Progress) Pending() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return len(p.queue)
+}
+
+// RetryFailed queues every failed file to be uploaded again, with a fresh
+// set of tries, and returns how many it queued. A running Job picks them up
+// once the files ahead of them are done; otherwise run the Job again.
+func (p *Progress) RetryFailed() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for i := range p.files {
+		if f := &p.files[i]; f.Stage == StageFailed {
+			f.Stage, f.Fraction, f.Tries = StageQueued, 0, 0
+			p.queue = append(p.queue, i)
+			n++
+		}
+	}
+	if n > 0 {
+		p.changed.Broadcast()
+	}
+	return n
+}
+
+// next takes the next queued file. While the queue is empty but other files
+// are still uploading it waits, since one of them may fail and be queued
+// again. It returns false when nothing is left or ctx is done.
+func (p *Progress) next(ctx context.Context) (int, FileStatus, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for {
+		if ctx.Err() != nil {
+			return 0, FileStatus{}, false
+		}
+		if len(p.queue) > 0 {
+			i := p.queue[0]
+			p.queue = p.queue[1:]
+			p.active++
+			p.files[i].Tries++
+			return i, p.files[i], true
+		}
+		if p.active == 0 {
+			return 0, FileStatus{}, false
+		}
+		p.changed.Wait()
+	}
+}
+
+// finish records how file i's try ended. A failed file with tries left goes
+// to the back of the queue, so it is tried again after the files ahead of it.
+func (p *Progress) finish(i int, err error, retry bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f := &p.files[i]
+	p.active--
+	switch {
+	case err == nil:
+		f.Stage, f.Fraction, f.Err = StageDone, 0, nil
+	case retry:
+		f.Stage, f.Fraction, f.Err = StageQueued, 0, err
+		p.queue = append(p.queue, i)
+	default:
+		f.Stage, f.Err = StageFailed, err
+	}
+	p.changed.Broadcast()
+}
+
+// wake wakes workers waiting in next, so they notice ctx is done.
+func (p *Progress) wake() {
+	p.mu.Lock()
+	p.changed.Broadcast()
+	p.mu.Unlock()
 }
 
 func (p *Progress) update(i int, fn func(*FileStatus)) {
@@ -122,14 +225,18 @@ func (p *Progress) setFraction(i int, v float64) {
 	p.update(i, func(f *FileStatus) { f.Fraction = v })
 }
 
-func (p *Progress) fail(i int, err error) {
-	p.update(i, func(f *FileStatus) { f.Stage, f.Err = StageFailed, err })
-}
-
 // DefaultWorkers is how many files a Job prepares and uploads at once when
 // Workers is not set: enough that uploads run while other files compress,
 // without running many ffmpeg processes side by side.
 const DefaultWorkers = 3
+
+// DefaultAttempts is how many times a Job tries each file when Attempts is
+// not set.
+const DefaultAttempts = 3
+
+// DefaultRetryDelay is how long a Job waits before trying a file again when
+// RetryDelay is not set; it grows with each try.
+const DefaultRetryDelay = 2 * time.Second
 
 // Job uploads Files to the rxstorage item ItemID. The files are read from
 // Folder, or from the ISO image ISO when it is set.
@@ -141,12 +248,25 @@ type Job struct {
 	Files  []settings.File
 	// Workers is how many files are handled at once; DefaultWorkers if 0.
 	Workers int
+	// Attempts is how many times a file is tried before it is marked failed;
+	// DefaultAttempts if 0. Only errors that may pass are tried again.
+	Attempts int
+	// RetryDelay is the wait before a file's second try, doubled for each
+	// later one; DefaultRetryDelay if 0, no wait if negative.
+	RetryDelay time.Duration
 }
 
-// Run uploads the files, several at a time, recording each in p. A file that
-// fails is marked failed and the rest still upload; Run itself fails only
-// when nothing can be uploaded, or when ctx is cancelled.
+// Run uploads the files queued in p, several at a time, recording each in p.
+// A file that fails with an error that may pass, such as a network or server
+// error, goes to the back of the queue to be tried again; once out of tries,
+// or on an error that will not pass, it is marked failed and the rest still
+// upload. Files queued by p.RetryFailed while Run works are uploaded too.
+// Run itself fails only when nothing can be uploaded, or when ctx is
+// cancelled, which leaves files not yet started queued.
 func (j Job) Run(ctx context.Context, p *Progress) error {
+	if p == nil {
+		p = NewProgress(j.Files)
+	}
 	if needsFFmpeg(j.Files) {
 		if err := media.Available(); err != nil {
 			return err
@@ -168,49 +288,80 @@ func (j Job) Run(ctx context.Context, p *Progress) error {
 		src = &source{im: im}
 	}
 
-	workers := j.Workers
-	if workers <= 0 {
-		workers = DefaultWorkers
-	}
-	next := make(chan int)
+	workers := cmp.Or(max(j.Workers, 0), DefaultWorkers)
+	attempts := cmp.Or(max(j.Attempts, 0), DefaultAttempts)
+	stop := context.AfterFunc(ctx, p.wake)
+	defer stop()
+
+	// Files are taken from the queue in order, so they start in the order
+	// listed, with files being tried again after them.
 	var wg sync.WaitGroup
 	for range min(workers, len(j.Files)) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for i := range next {
-				if ctx.Err() != nil {
-					continue // stopped before this file started: leave it queued
+			for {
+				i, st, ok := p.next(ctx)
+				if !ok {
+					return
 				}
 				f := j.Files[i]
-				if err := j.upload(ctx, src, tmp, i, f, p); err != nil {
-					if ctx.Err() != nil {
-						p.fail(i, context.Cause(ctx))
-						continue
-					}
-					slog.Error("upload failed", "item", j.ItemID, "file", f.RelPath, "err", err)
-					p.fail(i, err)
-					continue
+				err := j.wait(ctx, st.Tries)
+				if err == nil {
+					err = j.upload(ctx, src, tmp, i, f, p)
 				}
-				p.setStage(i, StageDone)
+				switch {
+				case err == nil:
+				case ctx.Err() != nil:
+					err = context.Cause(ctx)
+				case st.Tries < attempts && Retryable(err):
+					slog.Warn("upload failed; will retry", "item", j.ItemID, "file", f.RelPath,
+						"try", st.Tries, "of", attempts, "err", err)
+					p.finish(i, err, true)
+					continue
+				default:
+					slog.Error("upload failed", "item", j.ItemID, "file", f.RelPath, "tries", st.Tries, "err", err)
+				}
+				p.finish(i, err, false)
 			}
 		}()
 	}
-	// Files are handed out in order, so they start in the order listed.
-feed:
-	for i := range j.Files {
-		select {
-		case next <- i:
-		case <-ctx.Done():
-			break feed
-		}
-	}
-	close(next)
 	wg.Wait()
 	if ctx.Err() != nil {
 		return context.Cause(ctx)
 	}
 	return nil
+}
+
+// wait pauses before a file's try when it has been tried before.
+func (j Job) wait(ctx context.Context, try int) error {
+	delay := cmp.Or(j.RetryDelay, DefaultRetryDelay)
+	if try <= 1 || delay < 0 {
+		return nil
+	}
+	t := time.NewTimer(delay << min(try-2, 5))
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return context.Cause(ctx)
+	}
+}
+
+// Retryable reports whether an upload that failed with err may succeed if
+// tried again. Missing files, rejected sign-ins and requests the server
+// refused, such as a file the item already has, will fail the same way.
+func Retryable(err error) bool {
+	var status *remote.StatusError
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, fs.ErrNotExist),
+		errors.Is(err, fs.ErrPermission), errors.Is(err, remote.ErrUnauthorized):
+		return false
+	case errors.As(err, &status):
+		return status.Temporary()
+	}
+	return true
 }
 
 // source reads files out of an ISO image. The image is read through a single
@@ -258,6 +409,8 @@ func (j Job) upload(ctx context.Context, src *source, tmp string, i int, f setti
 			return err
 		}
 		defer os.Remove(local)
+	} else if _, err := os.Stat(local); err != nil {
+		return err // a missing file is not tried again
 	}
 
 	p.setStage(i, StagePreparing)
