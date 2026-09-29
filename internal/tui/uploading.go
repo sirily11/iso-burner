@@ -102,7 +102,7 @@ func (m Model) updateUploadRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		r.statuses, r.elapsed = r.progress.Snapshot(), time.Since(r.started)
 		m.reportUpload()
-		return m, uploadTick()
+		return m, tea.Batch(uploadTick(), m.refreshContents())
 	case uploadDoneMsg:
 		r.running, r.err = false, msg.err
 		r.statuses, r.elapsed = r.progress.Snapshot(), time.Since(r.started)
@@ -119,6 +119,7 @@ func (m Model) updateUploadRun(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.cancelled {
 			return m, tea.Quit
 		}
+		return m, m.countContents()
 	}
 	return m, nil
 }
@@ -222,6 +223,7 @@ func (m Model) uploadRunView() string {
 		counts[upload.StageDone]+failed, len(r.statuses)))
 	b.WriteString(dimStyle.Render(fmt.Sprintf("%d done · %d active · %d queued · %d retrying · %d failed · %s elapsed",
 		counts[upload.StageDone], active, counts[upload.StageQueued]-retrying, retrying, failed, r.elapsed.Round(time.Second))) + "\n")
+	b.WriteString(dimStyle.Render("Item has "+m.contentCountLabel()) + "\n")
 	if line := m.syncStatusLine(r.sync); line != "" {
 		b.WriteString(line + "\n")
 	}

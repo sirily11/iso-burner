@@ -124,3 +124,20 @@ func TestPutFile(t *testing.T) {
 		t.Fatalf("err = %v, want HTTP 403 without the signature", err)
 	}
 }
+
+func TestCountItemContents(t *testing.T) {
+	var gotPath, gotLimit string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotLimit = r.URL.Path, r.URL.Query().Get("limit")
+		w.Write([]byte(`{"data":[{"id":"c1"}],"pagination":{"totalCount":12,"hasNextPage":true}}`))
+	}))
+	defer srv.Close()
+
+	n, err := NewClient(srv.URL, staticToken("tok")).CountItemContents(context.Background(), "i1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 12 || gotPath != "/api/v1/items/i1/contents" || gotLimit != "1" {
+		t.Errorf("count = %d, path = %q, limit = %q", n, gotPath, gotLimit)
+	}
+}

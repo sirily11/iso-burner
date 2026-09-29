@@ -90,6 +90,23 @@ func (c *Client) CreateFileContent(ctx context.Context, itemID string, data File
 	return err
 }
 
+// CountItemContents returns how many contents item itemID has.
+func (c *Client) CountItemContents(ctx context.Context, itemID string) (int, error) {
+	data, err := c.do(ctx, http.MethodGet, "/api/v1/items/"+url.PathEscape(itemID)+"/contents?limit=1", nil, "item", itemID)
+	if err != nil {
+		return 0, err
+	}
+	var page struct {
+		Pagination struct {
+			TotalCount int `json:"totalCount"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(data, &page); err != nil {
+		return 0, fmt.Errorf("rxstorage: reading item contents: %w", err)
+	}
+	return page.Pagination.TotalCount, nil
+}
+
 // PutFile uploads the file at path to a presigned URL. contentType must be
 // the one the URL was signed for. progress, when set, is called with the
 // bytes sent so far. Uploads have no overall timeout, since preview videos
