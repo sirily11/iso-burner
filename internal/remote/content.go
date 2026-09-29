@@ -40,12 +40,14 @@ type PreviewUpload struct {
 
 // RequestPreviewUploads creates content on item itemID for each request and
 // returns, in the same order, the URLs its thumbnail and preview video are
-// uploaded to. rxstorage refuses a title the item already has.
+// uploaded to. Content the item already has with the same title is replaced,
+// so a file whose earlier upload failed part way can be tried again.
 func (c *Client) RequestPreviewUploads(ctx context.Context, itemID string, reqs []PreviewRequest) ([]PreviewUpload, error) {
 	body, err := json.Marshal(struct {
-		ItemID string           `json:"item_id"`
-		Items  []PreviewRequest `json:"items"`
-	}{itemID, reqs})
+		ItemID    string           `json:"item_id"`
+		Items     []PreviewRequest `json:"items"`
+		Overwrite bool             `json:"overwrite"`
+	}{itemID, reqs, true})
 	if err != nil {
 		return nil, err
 	}
@@ -73,12 +75,14 @@ type FileContent struct {
 	FilePath string `json:"file_path"`
 }
 
-// CreateFileContent adds a file content to item itemID.
+// CreateFileContent adds a file content to item itemID, replacing any
+// content it already has with the same title.
 func (c *Client) CreateFileContent(ctx context.Context, itemID string, data FileContent) error {
 	body, err := json.Marshal(struct {
-		Type string      `json:"type"`
-		Data FileContent `json:"data"`
-	}{"file", data})
+		Type      string      `json:"type"`
+		Data      FileContent `json:"data"`
+		Overwrite bool        `json:"overwrite"`
+	}{"file", data, true})
 	if err != nil {
 		return err
 	}

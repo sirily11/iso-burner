@@ -38,7 +38,7 @@ func TestRequestPreviewUploads(t *testing.T) {
 	if len(ups) != 1 || ups[0].ID != "f1" || ups[0].ImageURL != "https://s3/img" || ups[0].VideoURL != "https://s3/vid" {
 		t.Errorf("uploads = %+v", ups)
 	}
-	if gotAuth != "Bearer tok" || got["item_id"] != "item1" {
+	if gotAuth != "Bearer tok" || got["item_id"] != "item1" || got["overwrite"] != true {
 		t.Errorf("auth = %q, body = %v", gotAuth, got)
 	}
 	item := got["items"].([]any)[0].(map[string]any)
@@ -77,7 +77,7 @@ func TestCreateFileContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotPath != "POST /api/v1/items/item 1/contents" || got["type"] != "file" {
+	if gotPath != "POST /api/v1/items/item 1/contents" || got["type"] != "file" || got["overwrite"] != true {
 		t.Errorf("request = %s %v", gotPath, got)
 	}
 	data := got["data"].(map[string]any)
