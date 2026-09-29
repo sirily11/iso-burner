@@ -1,6 +1,5 @@
-// Package printer shares local printers over the network through CUPS,
-// advertises them with Bonjour so iPhones and iPads find them as AirPrint
-// printers, and reads each printer's job queue.
+// Package printer shares local printers through AirPrint. Windows uses a
+// native IPP server and virtual queues; Unix systems use CUPS.
 package printer
 
 import (
@@ -22,7 +21,10 @@ type Printer struct {
 	Info     string
 	Location string
 	Model    string
-	// Shared is whether CUPS shares the queue on the network.
+	// Media dimensions are hundredths of a millimetre, as used by IPP.
+	MediaWidth, MediaHeight int
+	Color                   bool
+	// Shared is whether this service shares the queue on the network.
 	Shared bool
 	// State is "idle", "printing" or "disabled".
 	State string
@@ -101,7 +103,7 @@ type CUPS struct {
 }
 
 // System returns the Service for this machine.
-func System() Service { return CUPS{Run: runCommand} }
+func System() Service { return systemService() }
 
 func runCommand(ctx context.Context, name string, args ...string) (string, error) {
 	if _, err := exec.LookPath(name); err != nil {

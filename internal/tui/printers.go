@@ -575,7 +575,18 @@ func (m Model) printersView() string {
 
 // StopAdvertising withdraws the AirPrint adverts. Call it before exiting, or
 // the Bonjour tools keep advertising printers nobody is serving.
-func (m Model) StopAdvertising() { m.printers.stopAdvertising() }
+func (m Model) StopAdvertising() {
+	m.printers.stopAdvertising()
+	if closer, ok := m.printerSvc.(interface{ Close() error }); ok {
+		_ = closer.Close()
+	}
+}
+
+// TemporaryPrinterSharing reports whether exiting also stops the print server.
+func (m Model) TemporaryPrinterSharing() bool {
+	_, ok := m.printerSvc.(*printer.Native)
+	return ok
+}
 
 // SharedPrinters returns the labels of the printers shared in printer mode.
 func (m Model) SharedPrinters() []string {
