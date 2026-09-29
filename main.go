@@ -115,12 +115,13 @@ func main() {
 	if err := m.CloseSync(5 * time.Second); err != nil {
 		fmt.Fprintln(os.Stderr, "rxstorage sync:", err)
 	}
+	m.StopAdvertising()
 	if m.Mode() == tui.ModeBurn {
 		os.Exit(burnSummary(m, dbPath))
 	}
 	if m.Mode() == tui.ModePrinter {
 		if shared := m.SharedPrinters(); len(shared) > 0 {
-			fmt.Printf("Still sharing via AirPrint: %s\n", strings.Join(shared, ", "))
+			fmt.Printf("Stopped advertising to iPhones and iPads: %s\nThe printers stay shared with other computers; run iso-burner again to use AirPrint.\n", strings.Join(shared, ", "))
 		}
 		os.Exit(0)
 	}

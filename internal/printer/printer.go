@@ -1,6 +1,6 @@
-// Package printer shares local printers over the network through CUPS, which
-// advertises shared queues with Bonjour so iPhones and iPads find them as
-// AirPrint printers, and reads each printer's job queue.
+// Package printer shares local printers over the network through CUPS,
+// advertises them with Bonjour so iPhones and iPads find them as AirPrint
+// printers, and reads each printer's job queue.
 package printer
 
 import (
@@ -82,6 +82,9 @@ type Service interface {
 	// Unshare stops sharing the named printers.
 	Unshare(ctx context.Context, names []string) error
 	Queue(ctx context.Context, name string) (Queue, error)
+	// Advertise publishes a shared printer as an AirPrint printer until ctx
+	// is cancelled or advertising fails.
+	Advertise(ctx context.Context, p Printer) error
 }
 
 // Runner runs a CUPS command and returns its combined output.
@@ -90,6 +93,11 @@ type Runner func(ctx context.Context, name string, args ...string) (string, erro
 // CUPS is a Service backed by the CUPS command-line tools.
 type CUPS struct {
 	Run Runner
+	// Serve runs a command until it exits or ctx is cancelled; nil runs it
+	// on this machine.
+	Serve func(ctx context.Context, name string, args ...string) error
+	// OS picks the Bonjour tool; empty uses runtime.GOOS.
+	OS string
 }
 
 // System returns the Service for this machine.

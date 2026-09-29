@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -46,6 +47,21 @@ type queuesLoadedMsg struct {
 
 type queueTickMsg struct{ gen int }
 
+// advertiseEndedMsg reports that the AirPrint advert of a printer stopped.
+type advertiseEndedMsg struct {
+	gen  int
+	name string
+	err  error
+}
+
+// advertising is the set of running AirPrint adverts. It is shared by pointer
+// so every copy of the model can stop the same adverts.
+type advertising struct {
+	gen    int
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+}
+
 // printerShare shares printers over AirPrint and then watches their queues.
 type printerShare struct {
 	svc    printer.Service
@@ -66,6 +82,10 @@ type printerShare struct {
 	gen       int
 	queueIdx  int
 	detailOff int
+
+	adv     *advertising // nil when nothing is advertised
+	advGen  int
+	advErrs map[string]error // by queue name
 
 	back bool // the user left printer mode
 }
@@ -138,6 +158,49 @@ func queueTick(gen int) tea.Cmd {
 	return tea.Tick(queueRefresh, func(time.Time) tea.Msg { return queueTickMsg{gen: gen} })
 }
 
+// advertiseTimeout bounds how long stopping the adverts waits for the Bonjour
+// tools to exit.
+const advertiseTimeout = 3 * time.Second
+
+// startAdvertising publishes shared as AirPrint printers, replacing any adverts
+// that are running. macOS shares the queues without the Bonjour record iOS
+// looks for, so iso-burner publishes it while it runs.
+func (p printerShare) startAdvertising(shared []printer.Printer) (printerShare, tea.Cmd) {
+	p.stopAdvertising()
+	p.advGen++
+	p.advErrs = map[string]error{}
+	ctx, cancel := context.WithCancel(context.Background())
+	adv := &advertising{gen: p.advGen, cancel: cancel}
+	p.adv = adv
+	svc := p.svc
+	cmds := make([]tea.Cmd, len(shared))
+	for i, pr := range shared {
+		adv.wg.Add(1)
+		cmds[i] = func() tea.Msg {
+			defer adv.wg.Done()
+			err := svc.Advertise(ctx, pr)
+			return advertiseEndedMsg{gen: adv.gen, name: pr.Name, err: err}
+		}
+	}
+	return p, tea.Batch(cmds...)
+}
+
+// stopAdvertising withdraws the AirPrint adverts and waits for them to end.
+func (p *printerShare) stopAdvertising() {
+	if p.adv == nil {
+		return
+	}
+	adv := p.adv
+	p.adv = nil
+	adv.cancel()
+	done := make(chan struct{})
+	go func() { adv.wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(advertiseTimeout):
+	}
+}
+
 // openQueues switches to the queue summary and starts refreshing it.
 func (p printerShare) openQueues(shared []printer.Printer) (printerShare, tea.Cmd) {
 	p.gen++
@@ -171,6 +234,7 @@ func (p printerShare) update(msg tea.Msg) (printerShare, tea.Cmd) {
 		if len(msg.shared) == 0 {
 			p.notice = fmt.Sprintf("Stopped sharing %d printer(s)", msg.unshared)
 			p.shared = nil
+			p.stopAdvertising()
 			p.loading = true
 			return p, p.list()
 		}
@@ -178,7 +242,15 @@ func (p printerShare) update(msg tea.Msg) (printerShare, tea.Cmd) {
 		for i, pr := range p.printers {
 			p.printers[i].Shared = p.selected[pr.Name]
 		}
-		return p.openQueues(msg.shared)
+		p, advertise := p.startAdvertising(msg.shared)
+		p, load := p.openQueues(msg.shared)
+		return p, tea.Batch(advertise, load)
+
+	case advertiseEndedMsg:
+		if p.adv != nil && msg.gen == p.adv.gen && msg.err != nil {
+			p.advErrs[msg.name] = msg.err
+		}
+		return p, nil
 
 	case queuesLoadedMsg:
 		if msg.gen != p.gen || p.screen == screenPrinterPick {
@@ -350,6 +422,9 @@ func (p printerShare) pickView() string {
 
 // queueSummary describes a printer's queue in one line.
 func (p printerShare) queueSummary(name string) string {
+	if err := p.advErrs[name]; err != nil {
+		return errorStyle.Render("✗ " + err.Error())
+	}
 	if err := p.queueErrs[name]; err != nil {
 		return errorStyle.Render("✗ " + err.Error())
 	}
@@ -370,7 +445,7 @@ func (p printerShare) queueSummary(name string) string {
 func (p printerShare) queuesView() string {
 	var b strings.Builder
 	b.WriteString(labelStyle.Render("Shared printers") +
-		dimStyle.Render("  (iPhones and iPads on this network can print to these via AirPrint)") + "\n\n")
+		dimStyle.Render("  (iPhones and iPads on this network can print to these via AirPrint while iso-burner is open)") + "\n\n")
 	printing, waiting := 0, 0
 	for i, pr := range p.shared {
 		line := pr.Label()
@@ -405,6 +480,11 @@ func (p printerShare) detailView() string {
 	row("Queue", pr.Name)
 	row("Model", pr.Model)
 	row("Location", pr.Location)
+	if err := p.advErrs[pr.Name]; err != nil {
+		row("AirPrint", errorStyle.Render("✗ "+err.Error()))
+	} else {
+		row("AirPrint", printer.AdvertisedName(pr))
+	}
 	if err := p.queueErrs[pr.Name]; err != nil {
 		b.WriteString("\n" + errorStyle.Render("✗ "+err.Error()) + "\n")
 		return b.String()
@@ -460,7 +540,10 @@ func (p printerShare) help() string {
 func (m Model) startPrinters() (tea.Model, tea.Cmd) {
 	m.mode = ModePrinter
 	m.modeChosen = true
-	m.printers = newPrinterShare(m.printerSvc, m.printers.gen)
+	prev := m.printers
+	m.printers = newPrinterShare(m.printerSvc, prev.gen)
+	// Adverts outlive leaving printer mode, so keep them to stop later.
+	m.printers.adv, m.printers.advGen, m.printers.advErrs, m.printers.shared = prev.adv, prev.advGen, prev.advErrs, prev.shared
 	return m, m.printers.list()
 }
 
@@ -489,6 +572,10 @@ func (m Model) printersView() string {
 	b.WriteString("\n" + dimStyle.Render(m.printers.help()))
 	return panelStyle.Render(b.String()) + "\n"
 }
+
+// StopAdvertising withdraws the AirPrint adverts. Call it before exiting, or
+// the Bonjour tools keep advertising printers nobody is serving.
+func (m Model) StopAdvertising() { m.printers.stopAdvertising() }
 
 // SharedPrinters returns the labels of the printers shared in printer mode.
 func (m Model) SharedPrinters() []string {
