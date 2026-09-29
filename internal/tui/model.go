@@ -20,6 +20,7 @@ import (
 	"github.com/sirily11/iso-burner/internal/burn"
 	"github.com/sirily11/iso-burner/internal/drive"
 	"github.com/sirily11/iso-burner/internal/iso"
+	"github.com/sirily11/iso-burner/internal/printer"
 	"github.com/sirily11/iso-burner/internal/recent"
 	"github.com/sirily11/iso-burner/internal/remote"
 	"github.com/sirily11/iso-burner/internal/settings"
@@ -77,6 +78,8 @@ type Options struct {
 	DBPath string
 	// Burner writes discs; nil uses burn.System().
 	Burner burn.Burner
+	// Printers shares printers via AirPrint; nil uses printer.System().
+	Printers printer.Service
 	// Auth signs in with RxAuth; nil disables the account screen.
 	Auth auth.Service
 	// Sync sends generation and burning progress to rxstorage while signed
@@ -92,6 +95,8 @@ type Options struct {
 	Folder     string
 	Pattern    string
 	ISOName    string
+	// StartIndex numbers the first ISO; empty starts at 1.
+	StartIndex string
 	OutputDir  string
 }
 
@@ -104,6 +109,9 @@ type Model struct {
 	modeIdx    int
 	modeChosen bool // mode was picked on the selection screen, so esc returns there
 	modeErr    error
+
+	printerSvc printer.Service
+	printers   printerShare
 
 	uploadAfterSignIn bool // upload was chosen while signed out; start it once signed in
 	itemSearch        itemSearch
@@ -168,6 +176,8 @@ type Model struct {
 	picking      bool
 	patternInput textinput.Model
 	nameInput    textinput.Model
+	startInput   textinput.Model
+	startFocused bool // the start index, not the ISO name, has focus on the name step
 	presetIdx    int
 
 	scanning          bool
@@ -213,9 +223,14 @@ func New(opts Options) Model {
 	name.Placeholder = "backup"
 	name.SetValue(cmp.Or(opts.ISOName, last.ISOName))
 
-	m := Model{mode: opts.Mode, folderInput: folder, patternInput: pattern, nameInput: name, outputDir: opts.OutputDir,
+	start := textinput.New()
+	start.Placeholder = "1"
+	start.CharLimit = len(fmt.Sprint(settings.MaxStartIndex))
+	start.SetValue(opts.StartIndex)
+
+	m := Model{mode: opts.Mode, folderInput: folder, patternInput: pattern, nameInput: name, startInput: start, outputDir: opts.OutputDir,
 		listDrives: opts.ListDrives, discRoot: opts.DiscRoot, store: opts.Store, dbPath: opts.DBPath, burner: opts.Burner,
-		auth: opts.Auth, authChecking: opts.Auth != nil,
+		auth: opts.Auth, authChecking: opts.Auth != nil, printerSvc: opts.Printers,
 		sync: opts.Sync, syncInterval: opts.SyncInterval,
 		recent: last, recentPath: opts.RecentPath}
 	for i, p := range settings.Presets {
@@ -229,6 +244,12 @@ func New(opts Options) Model {
 	m.hostName, _ = os.Hostname()
 	if m.burner == nil {
 		m.burner = burn.System()
+	}
+	if m.printerSvc == nil {
+		m.printerSvc = printer.System()
+	}
+	if m.mode == ModePrinter {
+		m.printers = newPrinterShare(m.printerSvc, 0)
 	}
 	if m.discRoot == nil {
 		m.discRoot = drive.MountPoint
@@ -277,10 +298,14 @@ func (m Model) Mode() Mode {
 func (m Model) GenerateErr() error { return m.genErr }
 
 func (m Model) Init() tea.Cmd {
-	if m.auth == nil {
-		return textinput.Blink
+	cmds := []tea.Cmd{textinput.Blink}
+	if m.auth != nil {
+		cmds = append(cmds, checkAuthCmd(m.auth))
 	}
-	return tea.Batch(textinput.Blink, checkAuthCmd(m.auth))
+	if m.mode == ModePrinter {
+		cmds = append(cmds, m.printers.list())
+	}
+	return tea.Batch(cmds...)
 }
 
 // User returns the signed-in RxAuth account, or nil.
@@ -319,6 +344,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == ModeUpload {
 		return m.updateUpload(msg)
+	}
+	if m.mode == ModePrinter {
+		return m.updatePrinters(msg)
 	}
 	if m.step == stepGenerate {
 		return m.updateGenerate(msg)
@@ -371,6 +399,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.presetIdx = (m.presetIdx + 1) % len(settings.Presets)
 			}
 			return m, nil
+		}
+		if m.step == stepName {
+			switch msg.String() {
+			case "tab", "shift+tab", "up", "down":
+				m.startFocused = !m.startFocused
+				return m.goTo(stepName)
+			}
 		}
 		if m.step == stepConfirm {
 			switch msg.String() {
@@ -430,7 +465,11 @@ func (m Model) updateInput(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshMatches()
 		}
 	case stepName:
-		m.nameInput, cmd = m.nameInput.Update(msg)
+		if m.startFocused {
+			m.startInput, cmd = m.startInput.Update(msg)
+		} else {
+			m.nameInput, cmd = m.nameInput.Update(msg)
+		}
 		m.err = nil
 	}
 	return m, cmd
@@ -485,7 +524,12 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 			m.err = err
 			return m, nil
 		}
-		chunks, err := settings.PlanChunks(m.matched, settings.UsableCapacity(settings.Presets[m.presetIdx].Bytes), name)
+		start, err := settings.ParseStartIndex(m.startInput.Value())
+		if err != nil {
+			m.err = err
+			return m, nil
+		}
+		chunks, err := settings.PlanChunks(m.matched, settings.UsableCapacity(settings.Presets[m.presetIdx].Bytes), name, start)
 		if err != nil {
 			m.err = err
 			return m, nil
@@ -502,6 +546,8 @@ func (m Model) submit() (tea.Model, tea.Cmd) {
 			Pattern: re,
 			Preset:  settings.Presets[m.presetIdx],
 			ISOName: strings.TrimSpace(m.nameInput.Value()),
+			// The plan was made from the start index, so read it back from there.
+			StartIndex: m.chunks[0].Index,
 		}
 		if abs, err := filepath.Abs(m.result.Folder); err == nil {
 			m.recent.Folder = abs
@@ -524,12 +570,16 @@ func (m Model) goTo(s step) (tea.Model, tea.Cmd) {
 	m.folderInput.Blur()
 	m.patternInput.Blur()
 	m.nameInput.Blur()
+	m.startInput.Blur()
 	switch s {
 	case stepFolder:
 		return m, m.folderInput.Focus()
 	case stepPattern:
 		return m, m.patternInput.Focus()
 	case stepName:
+		if m.startFocused {
+			return m, m.startInput.Focus()
+		}
 		return m, m.nameInput.Focus()
 	}
 	return m, nil
@@ -545,6 +595,9 @@ func (m Model) View() string {
 	if m.mode == ModeUpload {
 		return m.uploadView()
 	}
+	if m.mode == ModePrinter {
+		return m.printersView()
+	}
 
 	var b strings.Builder
 	if m.mode == ModeNone {
@@ -554,7 +607,7 @@ func (m Model) View() string {
 		b.WriteString(titleStyle.Render("ISO Burner") + "\n")
 		b.WriteString(m.accountSummary() + "\n\n")
 		b.WriteString(m.modeView())
-		b.WriteString("\n" + dimStyle.Render("↑/↓: choose · 1-3 or enter: select · a: account · esc: quit"))
+		b.WriteString("\n" + dimStyle.Render("↑/↓: choose · 1-4 or enter: select · a: account · esc: quit"))
 		return panelStyle.Render(b.String()) + "\n"
 	}
 	title := "ISO Burner · Settings"
@@ -650,12 +703,18 @@ func (m Model) nameView() string {
 	var b strings.Builder
 	b.WriteString(labelStyle.Render("ISO name") + "\n")
 	b.WriteString(m.nameInput.View() + "\n\n")
+	b.WriteString(labelStyle.Render("Start index") + dimStyle.Render("  (number of the first ISO)") + "\n")
+	b.WriteString(m.startInput.View() + "\n\n")
 	name := strings.TrimSpace(m.nameInput.Value())
 	if name == "" {
 		name = "{iso_name}"
 	}
-	b.WriteString(dimStyle.Render("Output files: " + settings.OutputName(name, 1) + ", " +
-		settings.OutputName(name, 2) + ", …"))
+	start, err := settings.ParseStartIndex(m.startInput.Value())
+	if err != nil {
+		start = 1
+	}
+	b.WriteString(dimStyle.Render("Output files: " + settings.OutputName(name, start) + ", " +
+		settings.OutputName(name, start+1) + ", …"))
 	b.WriteString("\n")
 	return b.String()
 }
@@ -675,6 +734,7 @@ func (m Model) confirmView() string {
 	row("Files", fmt.Sprintf("%d (%s)", len(m.matched), settings.FormatBytes(settings.TotalSize(m.matched))))
 	row("ISO size", fmt.Sprintf("%s · %s", preset.Name, settings.FormatBytes(preset.Bytes)))
 	row("ISO name", strings.TrimSpace(m.nameInput.Value()))
+	row("ISO files", fmt.Sprintf("%s … %s", m.chunks[0].Name, m.chunks[len(m.chunks)-1].Name))
 	if m.outputDir != "" {
 		row("Destination", m.outputDir)
 	}
@@ -748,6 +808,8 @@ func (m Model) help() string {
 		return "enter: scan folder · tab: browse folders · esc: quit"
 	case stepSize:
 		return "↑/↓: choose · enter: next · esc: back"
+	case stepName:
+		return "tab: name/start index · enter: next · esc: back · ctrl+c: quit"
 	case stepGenerate:
 		return m.generateHelp()
 	case stepConfirm:

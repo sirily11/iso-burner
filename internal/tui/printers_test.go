@@ -1,0 +1,194 @@
+package tui
+
+import (
+	"context"
+	"errors"
+	"slices"
+	"strings"
+	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/sirily11/iso-burner/internal/printer"
+)
+
+// fakePrinters is an in-memory printer.Service.
+type fakePrinters struct {
+	printers []printer.Printer
+	queues   map[string]printer.Queue
+	shareErr error
+	shared   []string
+	unshared []string
+}
+
+func (f *fakePrinters) List(context.Context) ([]printer.Printer, error) {
+	return slices.Clone(f.printers), nil
+}
+
+func (f *fakePrinters) Share(_ context.Context, names []string) error {
+	if f.shareErr != nil {
+		return f.shareErr
+	}
+	f.shared = append(f.shared, names...)
+	return nil
+}
+
+func (f *fakePrinters) Unshare(_ context.Context, names []string) error {
+	f.unshared = append(f.unshared, names...)
+	return nil
+}
+
+func (f *fakePrinters) Queue(_ context.Context, name string) (printer.Queue, error) {
+	q, ok := f.queues[name]
+	if !ok {
+		return printer.Queue{}, errors.New("no such printer")
+	}
+	return q, nil
+}
+
+func newFakePrinters() *fakePrinters {
+	return &fakePrinters{
+		printers: []printer.Printer{
+			{Name: "HP", Info: "Office HP", State: "printing"},
+			{Name: "Canon", Info: "Canon Photo", State: "idle", Shared: true},
+			{Name: "Brother", State: "idle"},
+		},
+		queues: map[string]printer.Queue{
+			"HP": {Status: "ready and printing", Jobs: []printer.Job{
+				{ID: 12, Rank: "active", Owner: "alice", Title: "report.pdf", Size: 2048},
+				{ID: 13, Rank: "1st", Owner: "bob", Title: "Photo 1.jpg", Size: 1024},
+			}},
+			"Canon": {Status: "ready"},
+		},
+	}
+}
+
+// sendPrinter delivers msg and runs the returned command chain until it stops
+// producing printer messages, skipping refresh ticks so tests do not wait.
+func sendPrinter(t *testing.T, m Model, msg tea.Msg) Model {
+	t.Helper()
+	next, cmd := m.Update(msg)
+	m = next.(Model)
+	for cmd != nil {
+		out := cmd()
+		switch out.(type) {
+		case printersLoadedMsg, printersSharedMsg, queuesLoadedMsg:
+			next, cmd = m.Update(out)
+			m = next.(Model)
+		default:
+			return m
+		}
+	}
+	return m
+}
+
+func openPrinterMode(t *testing.T, svc *fakePrinters) Model {
+	t.Helper()
+	m := New(Options{Folder: t.TempDir(), Printers: svc})
+	m = sendPrinter(t, m, key("4"))
+	if m.Mode() != ModePrinter {
+		t.Fatalf("pressing 4 should open printer mode, got %d", m.Mode())
+	}
+	return m
+}
+
+func TestPrinterShareFlow(t *testing.T) {
+	svc := newFakePrinters()
+	m := openPrinterMode(t, svc)
+	view := m.View()
+	for _, want := range []string{"[ ] Office HP", "[x] Canon Photo", "idle · shared", "1 of 3 printer(s) selected"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("picker missing %q:\n%s", want, view)
+		}
+	}
+
+	// Tick HP (the cursor starts on it) and untick Canon.
+	m = sendPrinter(t, m, key(" "))
+	m = sendPrinter(t, m, key("down"))
+	m = sendPrinter(t, m, key(" "))
+	m = sendPrinter(t, m, key("down"))
+	m = sendPrinter(t, m, key(" "))
+	m = sendPrinter(t, m, key("enter"))
+	if !slices.Equal(svc.shared, []string{"HP", "Brother"}) || !slices.Equal(svc.unshared, []string{"Canon"}) {
+		t.Fatalf("shared %v, unshared %v", svc.shared, svc.unshared)
+	}
+	if m.printers.screen != screenPrinterQueues {
+		t.Fatalf("sharing should open the queues, screen=%d", m.printers.screen)
+	}
+	view = m.View()
+	for _, want := range []string{"Shared printers", "› Office HP", "printing report.pdf", "1 queued",
+		"Brother", "no such printer", "1 printing · 1 job(s) queued"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("queues missing %q:\n%s", want, view)
+		}
+	}
+
+	m = sendPrinter(t, m, key("enter"))
+	view = m.View()
+	for _, want := range []string{"Jobs (2)", "#12", "report.pdf", "printing · alice", "#13", "queued 1st · bob"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("detail missing %q:\n%s", want, view)
+		}
+	}
+
+	m = sendPrinter(t, m, key("esc"))
+	if m.printers.screen != screenPrinterQueues {
+		t.Fatal("esc in details should go back to the queues")
+	}
+	m = sendPrinter(t, m, key("esc"))
+	if m.printers.screen != screenPrinterPick || !strings.Contains(m.View(), "[x] Office HP") {
+		t.Fatalf("esc in the queues should go back to the picker:\n%s", m.View())
+	}
+	m = sendPrinter(t, m, key("esc"))
+	if m.Mode() != ModeNone || m.cancelled {
+		t.Fatal("esc in the picker should return to mode selection")
+	}
+	if got := m.SharedPrinters(); !slices.Equal(got, []string{"Office HP", "Brother"}) {
+		t.Fatalf("SharedPrinters = %v", got)
+	}
+}
+
+func TestPrinterRefreshIgnoresStaleLoops(t *testing.T) {
+	svc := newFakePrinters()
+	m := openPrinterMode(t, svc)
+	m = sendPrinter(t, m, key("enter")) // share Canon as it is
+	gen := m.printers.gen
+	next, cmd := m.Update(queueTickMsg{gen: gen - 1})
+	if cmd != nil {
+		t.Fatal("a tick from an old refresh loop should be dropped")
+	}
+	if _, cmd = next.(Model).Update(queueTickMsg{gen: gen}); cmd == nil {
+		t.Fatal("a tick from the current loop should refresh the queues")
+	}
+}
+
+func TestPrinterShareErrors(t *testing.T) {
+	svc := newFakePrinters()
+	svc.printers[1].Shared = false
+	m := openPrinterMode(t, svc)
+	m = sendPrinter(t, m, key("enter"))
+	if m.printers.err == nil || m.printers.screen != screenPrinterPick {
+		t.Fatal("enter with nothing selected and nothing shared should show an error")
+	}
+
+	svc.shareErr = errors.New("cupsctl: Forbidden")
+	m = sendPrinter(t, m, key(" "))
+	m = sendPrinter(t, m, key("enter"))
+	if !strings.Contains(m.View(), "Forbidden") || m.printers.screen != screenPrinterPick {
+		t.Fatalf("a failed share should stay on the picker with the error:\n%s", m.View())
+	}
+}
+
+func TestPrinterUnshareAll(t *testing.T) {
+	svc := newFakePrinters()
+	m := openPrinterMode(t, svc)
+	m = sendPrinter(t, m, key("down"))
+	m = sendPrinter(t, m, key(" ")) // untick Canon, the only shared printer
+	m = sendPrinter(t, m, key("enter"))
+	if !slices.Equal(svc.unshared, []string{"Canon"}) || m.printers.screen != screenPrinterPick {
+		t.Fatalf("unticking everything should stop sharing and stay on the picker: %v", svc.unshared)
+	}
+	if !strings.Contains(m.View(), "Stopped sharing 1 printer(s)") {
+		t.Fatalf("missing notice:\n%s", m.View())
+	}
+}

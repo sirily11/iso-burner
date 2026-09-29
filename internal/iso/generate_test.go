@@ -36,7 +36,7 @@ func TestGenerateWritesMountableSizedImagesWithSplitParts(t *testing.T) {
 		t.Fatal(err)
 	}
 	const target = settings.ReservedPerISO + 3*1024*1024
-	chunks, err := settings.PlanChunks(files, settings.UsableCapacity(target), "backup")
+	chunks, err := settings.PlanChunks(files, settings.UsableCapacity(target), "backup", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestGenerateCancelledPublishesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	const target = settings.ReservedPerISO + 1024*1024
-	chunks, err := settings.PlanChunks(files, settings.UsableCapacity(target), "backup")
+	chunks, err := settings.PlanChunks(files, settings.UsableCapacity(target), "backup", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

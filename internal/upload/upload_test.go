@@ -222,7 +222,7 @@ func TestRunFromISO(t *testing.T) {
 	source, isoDir := t.TempDir(), t.TempDir()
 	files := writeMedia(t, source)
 	const target = settings.ReservedPerISO + 16*1024*1024
-	chunks, err := settings.PlanChunks(files, settings.UsableCapacity(target), "backup")
+	chunks, err := settings.PlanChunks(files, settings.UsableCapacity(target), "backup", 1)
 	if err != nil {
 		t.Fatal(err)
 	}

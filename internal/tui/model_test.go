@@ -114,7 +114,7 @@ func TestWizardRejectsBadInput(t *testing.T) {
 
 func TestConfirmViewListsSplitFiles(t *testing.T) {
 	big := settings.File{RelPath: "movie.mkv", Size: 25 * settings.SectorSize}
-	chunks, err := settings.PlanChunks([]settings.File{big}, 10*settings.SectorSize, "movies")
+	chunks, err := settings.PlanChunks([]settings.File{big}, 10*settings.SectorSize, "movies", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,5 +170,39 @@ func TestConfirmPreviewScrollsFilesAndResetsOnNextISO(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "Planned ISO 10 of 10") || !strings.Contains(m.View(), "backup_10.iso") {
 		t.Fatalf("later ISO preview is unavailable:\n%s", m.View())
+	}
+}
+
+func TestWizardStartIndex(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.mkv"), make([]byte, 10), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Options{Mode: ModeGenerate, Folder: root, ISOName: "movies"})
+	m = send(t, m, enter) // folder
+	m = send(t, m, enter) // pattern
+	m = send(t, m, enter) // size
+	if m.step != stepName {
+		t.Fatalf("step = %d, want name", m.step)
+	}
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyTab})
+	m = typeText(t, m, "x")
+	m = send(t, m, enter)
+	if m.step != stepName || m.err == nil {
+		t.Fatal("non-numeric start index should be rejected")
+	}
+	m = send(t, m, tea.KeyMsg{Type: tea.KeyBackspace})
+	m = typeText(t, m, "42")
+	if !strings.Contains(m.View(), "movies_42.iso, movies_43.iso") {
+		t.Errorf("name step should preview numbering from 42:\n%s", m.View())
+	}
+	m = send(t, m, enter)
+	if m.step != stepConfirm {
+		t.Fatalf("step = %d, want confirm (err=%v)", m.step, m.err)
+	}
+	m = send(t, m, enter)
+	cfg, chunks := m.Result()
+	if cfg == nil || cfg.StartIndex != 42 || len(chunks) != 1 || chunks[0].Name != "movies_42.iso" {
+		t.Fatalf("unexpected result: %+v %+v", cfg, chunks)
 	}
 }
