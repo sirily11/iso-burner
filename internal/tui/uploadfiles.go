@@ -351,7 +351,8 @@ func (m Model) uploadFilesView() string {
 	switch f.stage {
 	case uploadStageRule:
 		b.WriteString(dimStyle.Render("Files will be added to this rxstorage item.") + "\n")
-		b.WriteString(selectedStyle.Render("✓ "+itemLabel(*m.itemSearch.chosen)) + "\n\n")
+		b.WriteString(selectedStyle.Render("✓ "+itemLabel(*m.itemSearch.chosen)) + "\n")
+		b.WriteString(dimStyle.Render("  "+m.contentCountLabel()+" on this item") + "\n\n")
 		b.WriteString(labelStyle.Render("Which files do you want to upload?") + "\n\n")
 		for i, r := range uploadRules {
 			line := fmt.Sprintf("%d. %s", i+1, r.title)
@@ -411,6 +412,7 @@ func (m Model) uploadReviewView() string {
 		b.WriteString(labelStyle.Render(fmt.Sprintf("%-8s", k)) + " " + v + "\n")
 	}
 	row("Item", itemLabel(*m.itemSearch.chosen))
+	row("Contents", m.contentCountLabel()+" already on the item")
 	switch f.rule {
 	case ruleISO:
 		row("ISO", f.iso)

@@ -126,6 +126,13 @@ func newItemServer(t *testing.T, items []remote.Item) *itemServer {
 			w.Write([]byte(`{}`))
 			return
 		}
+		if id, ok := strings.CutPrefix(r.URL.Path, "/api/v1/items/"); ok && r.Method == http.MethodGet {
+			s.mu.Lock()
+			n := len(s.contents[strings.TrimSuffix(id, "/contents")])
+			s.mu.Unlock()
+			json.NewEncoder(w).Encode(map[string]any{"data": []any{}, "pagination": map[string]any{"totalCount": n}})
+			return
+		}
 		if id, ok := strings.CutPrefix(r.URL.Path, "/api/v1/items/"); ok && r.Method == http.MethodPost {
 			var req struct{ Data remote.FileContent }
 			json.NewDecoder(r.Body).Decode(&req)
@@ -658,4 +665,64 @@ func TestUploadRunShowsRetryingFiles(t *testing.T) {
 		t.Fatalf("a file waiting to be retried should say so:\n%s", view)
 	}
 	m.uploadFiles.run.cancel()
+}
+
+func TestUploadShowsItemContentCount(t *testing.T) {
+	root := t.TempDir()
+	writeSizedFiles(t, root, map[string]int{"a.txt": 10, "b.pdf": 20})
+	server := newItemServer(t, sampleItems)
+	server.contents["i1"] = []remote.FileContent{{Title: "old.txt"}, {Title: "older.txt"}, {Title: "oldest.txt"}}
+	svc := &fakeAuth{user: &auth.User{ID: "u1", Name: "Ada"}}
+	m := New(Options{Auth: svc, Sync: server.client, Recent: recent.Recent{Folder: root}})
+	m = run(t, m, checkAuthCmd(svc))
+	next, cmd := m.Update(key("3"))
+	m = run(t, next.(Model), cmd)
+
+	next, cmd = m.Update(enter)
+	m = next.(Model)
+	if !strings.Contains(m.View(), "counting contents…") {
+		t.Fatalf("the count should show as loading until it arrives:\n%s", m.View())
+	}
+	m = run(t, m, cmd)
+	if !strings.Contains(m.View(), "3 content(s) on this item") {
+		t.Fatalf("choosing an item should show its content count:\n%s", m.View())
+	}
+
+	m = send(t, m, key("1"))
+	m = pickFile(t, m, enter)
+	m = send(t, m, enter)
+	if !strings.Contains(m.View(), "3 content(s) already on the item") {
+		t.Fatalf("review should show the content count:\n%s", m.View())
+	}
+
+	next, cmd = m.Update(enter)
+	m = next.(Model)
+	if !strings.Contains(m.View(), "Item has 3 content(s)") {
+		t.Fatalf("the upload should show the content count:\n%s", m.View())
+	}
+	var done tea.Msg
+	for _, c := range cmd().(tea.BatchMsg) {
+		if msg, ok := c().(uploadDoneMsg); ok {
+			done = msg
+		}
+	}
+	next, cmd = m.Update(done)
+	m = run(t, next.(Model), cmd)
+	if !strings.Contains(m.View(), "Item has 5 content(s)") {
+		t.Fatalf("a finished upload should recount the contents:\n%s", m.View())
+	}
+}
+
+func TestUploadDropsStaleContentCount(t *testing.T) {
+	m, _ := openFileRulesOn(t, recent.Recent{})
+	stale := m.itemSearch.countSeq
+	m.countContents()
+	m = send(t, m, itemContentsMsg{seq: stale, itemID: m.itemSearch.chosen.ID, count: 99})
+	if m.itemSearch.contentsKnown {
+		t.Fatal("an older count should be ignored")
+	}
+	m = send(t, m, itemContentsMsg{seq: m.itemSearch.countSeq, itemID: m.itemSearch.chosen.ID, count: 4})
+	if !strings.Contains(m.View(), "4 content(s) on this item") {
+		t.Fatalf("the latest count should be shown:\n%s", m.View())
+	}
 }

@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -20,6 +21,9 @@ const (
 	itemSearchLimit = 20
 	// itemSearchDelay waits for typing to pause before searching.
 	itemSearchDelay = 250 * time.Millisecond
+	// contentCountInterval is how often the chosen item's content count is
+	// refreshed while files are uploaded to it.
+	contentCountInterval = 2 * time.Second
 )
 
 // itemSearch finds the rxstorage item that uploaded content is added to.
@@ -34,6 +38,12 @@ type itemSearch struct {
 	err       error
 
 	chosen *remote.Item // the item the content goes to
+
+	contents      int       // how many contents the chosen item has
+	contentsKnown bool      // contents has been counted for the chosen item
+	countSeq      int       // bumped on every count so stale counts are dropped
+	counting      bool      // a count for countSeq is in flight
+	countedAt     time.Time // when the last count was requested
 }
 
 // itemSearchTickMsg fires once typing has paused for query seq.
@@ -44,6 +54,14 @@ type itemSearchMsg struct {
 	seq   int
 	items []remote.Item
 	err   error
+}
+
+// itemContentsMsg carries count seq of the contents of item itemID.
+type itemContentsMsg struct {
+	seq    int
+	itemID string
+	count  int
+	err    error
 }
 
 func newItemSearch() itemSearch {
@@ -71,6 +89,43 @@ func (m Model) searchItemsCmd(seq int, query string) tea.Cmd {
 		items, err := client.SearchItems(ctx, query, itemSearchLimit)
 		return itemSearchMsg{seq: seq, items: items, err: err}
 	}
+}
+
+// countContents counts the contents of the chosen item, dropping any count
+// still in flight.
+func (m *Model) countContents() tea.Cmd {
+	s := &m.itemSearch
+	if s.chosen == nil {
+		return nil
+	}
+	s.countSeq++
+	s.counting, s.countedAt = true, time.Now()
+	client, seq, itemID := m.sync, s.countSeq, s.chosen.ID
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		n, err := client.CountItemContents(ctx, itemID)
+		return itemContentsMsg{seq: seq, itemID: itemID, count: n, err: err}
+	}
+}
+
+// refreshContents recounts the chosen item's contents when the last count is
+// older than contentCountInterval and none is in flight.
+func (m *Model) refreshContents() tea.Cmd {
+	s := m.itemSearch
+	if s.counting || time.Since(s.countedAt) < contentCountInterval {
+		return nil
+	}
+	return m.countContents()
+}
+
+// contentCountLabel describes how many contents the chosen item has.
+func (m Model) contentCountLabel() string {
+	s := m.itemSearch
+	if !s.contentsKnown {
+		return "counting contents…"
+	}
+	return fmt.Sprintf("%d content(s)", s.contents)
 }
 
 // chooseUpload starts uploading content to an rxstorage item. Uploads go
@@ -114,6 +169,15 @@ func (m Model) updateUpload(msg tea.Msg) (tea.Model, tea.Cmd) {
 		s.searching, s.err = false, msg.err
 		if msg.err == nil {
 			s.items, s.cursor, s.offset = msg.items, 0, 0
+		}
+		return m, nil
+	case itemContentsMsg:
+		if msg.seq != s.countSeq || s.chosen == nil || msg.itemID != s.chosen.ID {
+			return m, nil
+		}
+		s.counting = false
+		if msg.err == nil {
+			s.contents, s.contentsKnown = msg.count, true
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -164,8 +228,10 @@ func (m Model) updateUploadKey(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if s.cursor < len(s.items) {
 			item := s.items[s.cursor]
 			s.chosen = &item
+			s.contentsKnown = false
 			s.input.Blur()
 			m.uploadFiles = newUploadFiles()
+			return m, m.countContents()
 		}
 		return m, nil
 	}
