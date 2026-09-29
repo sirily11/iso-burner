@@ -27,17 +27,35 @@ func TestWindowsPrinterSnapshots(t *testing.T) {
 	}
 }
 
+func TestWindowsPaperSnapshot(t *testing.T) {
+	printers, err := parseWindowsPrinterList([]byte(`[{"Name":"Deli DL-750W",
+		"DefaultPaper":{"Name":"USER","Width":10236,"Height":17882,"WindowsID":256},
+		"PaperSizes":[{"Name":"4 x 6","Width":10414,"Height":15240,"WindowsID":285}]}]`))
+	if err != nil || len(printers) != 1 {
+		t.Fatalf("printer snapshot: %v, %v", printers, err)
+	}
+	p := printers[0]
+	if p.DefaultPaper.WindowsID != 256 || p.DefaultPaper.Width != 10236 || len(p.PaperSizes) != 1 || p.PaperSizes[0].WindowsID != 285 {
+		t.Fatalf("driver paper details were lost: %+v", p)
+	}
+}
+
 func TestWindowsSpoolerIntegration(t *testing.T) {
 	if os.Getenv("ISO_BURNER_TEST_WINDOWS_PRINTER") == "" {
 		t.Skip("set ISO_BURNER_TEST_WINDOWS_PRINTER for a read-only Windows spooler check")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	printers, err := listWindowsPrinters(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, pr := range printers {
+		if !pr.DefaultPaper.valid() || len(pr.PaperSizes) == 0 {
+			t.Fatalf("%s has no driver paper settings: %+v", pr.Name, pr)
+		}
+		t.Logf("%s: default %s (%gx%g mm), %d supported sizes", pr.Name, pr.DefaultPaper.Name,
+			float64(pr.DefaultPaper.Width)/100, float64(pr.DefaultPaper.Height)/100, len(pr.PaperSizes))
 		if _, err := readWindowsQueue(ctx, pr.Name); err != nil {
 			t.Fatalf("%s: %v", pr.Name, err)
 		}

@@ -42,14 +42,18 @@ func windowsLANInterfaces(ctx context.Context) ([]net.Interface, error) {
 
 const windowsPrinterList = `
 Add-Type -AssemblyName System.Drawing
+function Read-Paper($paper) {
+    [pscustomobject]@{Name=$paper.PaperName;WindowsID=$paper.RawKind;
+        Width=[int][Math]::Round($paper.Width*25.4);Height=[int][Math]::Round($paper.Height*25.4)}
+}
 $rows = @(Get-Printer | Sort-Object Name | ForEach-Object {
     $settings = New-Object System.Drawing.Printing.PrinterSettings
     $settings.PrinterName = $_.Name
-    $paper = $settings.DefaultPageSettings.PaperSize
     [pscustomobject]@{Name=$_.Name;DriverName=$_.DriverName;Location=$_.Location;State=[string]$_.PrinterStatus;
-        MediaWidth=[int][Math]::Round($paper.Width*25.4);MediaHeight=[int][Math]::Round($paper.Height*25.4);Color=$settings.SupportsColor}
+        DefaultPaper=(Read-Paper $settings.DefaultPageSettings.PaperSize);
+        PaperSizes=@($settings.PaperSizes | ForEach-Object { Read-Paper $_ });Color=$settings.SupportsColor}
 })
-ConvertTo-Json -Compress -InputObject $rows
+ConvertTo-Json -Compress -Depth 5 -InputObject $rows
 `
 
 const windowsPrinterQueue = `
@@ -109,7 +113,8 @@ func listWindowsPrinters(ctx context.Context) ([]Printer, error) {
 func parseWindowsPrinterList(out []byte) ([]Printer, error) {
 	var rows []struct {
 		Name, DriverName, Location, State string
-		MediaWidth, MediaHeight           int
+		DefaultPaper                      PaperSize
+		PaperSizes                        []PaperSize
 		Color                             bool
 	}
 	if err := json.Unmarshal(out, &rows); err != nil {
@@ -118,7 +123,7 @@ func parseWindowsPrinterList(out []byte) ([]Printer, error) {
 	printers := make([]Printer, len(rows))
 	for i, row := range rows {
 		printers[i] = Printer{Name: row.Name, Info: row.Name, Model: row.DriverName,
-			Location: row.Location, State: windowsPrinterState(row.State), MediaWidth: row.MediaWidth, MediaHeight: row.MediaHeight, Color: row.Color}
+			Location: row.Location, State: windowsPrinterState(row.State), DefaultPaper: row.DefaultPaper, PaperSizes: row.PaperSizes, Color: row.Color}
 	}
 	return printers, nil
 }

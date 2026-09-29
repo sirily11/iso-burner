@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -29,6 +30,7 @@ const maxDocumentBytes = 128 << 20
 type Document struct {
 	Printer, Path, Format, Title, Owner, Media string
 	ID, Copies, Orientation                    int
+	Paper                                      PaperSize
 }
 
 // Native hosts IPP and Bonjour directly in this process. Callbacks isolate
@@ -39,6 +41,8 @@ type Native struct {
 	Interfaces   func(context.Context) ([]net.Interface, error)
 	ListenAddr   string // empty uses :8631; tests can request 127.0.0.1:0
 	mu           sync.Mutex
+	refreshMu    sync.Mutex
+	lastRefresh  time.Time
 	printers     map[string]Printer
 	jobs         map[int]*nativeJob
 	nextID       int
@@ -69,8 +73,12 @@ func (n *Native) List(ctx context.Context) ([]Printer, error) {
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	n.lastRefresh = time.Now()
 	for i := range rows {
 		_, rows[i].Shared = n.printers[rows[i].Name]
+		if rows[i].Shared {
+			n.printers[rows[i].Name] = rows[i]
+		}
 	}
 	return rows, nil
 }
@@ -120,7 +128,30 @@ func (n *Native) Share(ctx context.Context, names []string) error {
 		p.Shared = true
 		n.printers[name] = p
 	}
+	n.lastRefresh = time.Now()
 	return nil
+}
+
+// iOS can issue several capability requests while opening one print sheet.
+// Cache briefly and bound driver queries so an offline printer cannot stall
+// the handshake or the queue. A failed refresh retains the last known settings.
+func (n *Native) refreshPrinters(ctx context.Context) {
+	n.refreshMu.Lock()
+	defer n.refreshMu.Unlock()
+	n.mu.Lock()
+	fresh := time.Since(n.lastRefresh) < 5*time.Second
+	n.mu.Unlock()
+	if fresh {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if _, err := n.List(ctx); err != nil {
+		n.mu.Lock()
+		n.lastRefresh = time.Now()
+		n.mu.Unlock()
+		slog.Warn("AirPrint printer settings refresh failed", "err", err)
+	}
 }
 
 func (n *Native) Unshare(_ context.Context, names []string) error {
@@ -171,19 +202,7 @@ func (n *Native) Advertise(ctx context.Context, p Printer) error {
 	}
 	port := n.listener.Addr().(*net.TCPAddr).Port
 	n.mu.Unlock()
-	txt := airprintTXT(p)
-	for i, value := range txt {
-		if strings.HasPrefix(value, "rp=") {
-			txt[i] = "rp=printers/" + url.PathEscape(p.Name)
-		}
-		if strings.HasPrefix(value, "pdl=") {
-			txt[i] = "pdl=" + nativeFormats
-		}
-		if strings.HasPrefix(value, "URF=") {
-			txt[i] = "URF=W8,SRGB24,RS300"
-		}
-	}
-	txt = append(txt, "Duplex=F", "Copies=T", "Color="+map[bool]string{true: "T", false: "F"}[p.Color], "UUID="+nativePrinterUUID(p.Name))
+	txt := nativeAirprintTXT(p)
 	var ifaces []net.Interface
 	if n.Interfaces != nil {
 		var err error
@@ -199,6 +218,24 @@ func (n *Native) Advertise(ctx context.Context, p Printer) error {
 	defer server.Shutdown()
 	<-ctx.Done()
 	return nil
+}
+
+func nativeAirprintTXT(p Printer) []string {
+	// rp is a DNS-SD resource name, not an encoded URI. AirPrint clients
+	// escape it when building their URL. Pre-escaping spaces produces
+	// /printers/Deli%2520DL-750W and a printer-not-found response.
+	// See http_resolve_cb in OpenPrinting/cups/cups/http-support.c.
+	txt := airprintTXT(p)
+	for i, value := range txt {
+		if strings.HasPrefix(value, "pdl=") {
+			txt[i] = "pdl=" + nativeFormats
+		}
+		if strings.HasPrefix(value, "URF=") {
+			txt[i] = "URF=W8,SRGB24,RS300"
+		}
+	}
+	txt = append(txt, "Duplex=F", "Copies=T", "Color="+map[bool]string{true: "T", false: "F"}[p.Color], "UUID="+nativePrinterUUID(p.Name))
+	return txt
 }
 
 func (n *Native) Close() error {
@@ -254,6 +291,21 @@ func ippBool(attrs goipp.Attributes, name string, fallback bool) bool {
 }
 func printerPath(name string) string { return "/printers/" + url.PathEscape(name) }
 
+// Called with mu held. net/http has already unescaped URL.Path once. Older
+// Bonjour records escaped rp too, so cached iOS destinations can still contain
+// %20 here. Try one compatibility decode only after an exact queue-name lookup;
+// otherwise a real queue named "Office%20Printer" could print to "Office Printer".
+func (n *Native) printerForResource(name string) (Printer, bool) {
+	if p, ok := n.printers[name]; ok {
+		return p, true
+	}
+	if decoded, err := url.PathUnescape(name); err == nil && decoded != name {
+		p, ok := n.printers[decoded]
+		return p, ok
+	}
+	return Printer{}, false
+}
+
 func nativePrinterUUID(name string) string {
 	host, _ := os.Hostname()
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("iso-burner://"+host+printerPath(name))).String()
@@ -284,6 +336,7 @@ func (n *Native) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
 	var req goipp.Message
 	if err := req.Decode(io.LimitReader(r.Body, 64<<10)); err != nil {
+		slog.Warn("AirPrint request could not be decoded", "err", err)
 		http.Error(w, "Invalid IPP request", http.StatusBadRequest)
 		return
 	}
@@ -293,16 +346,27 @@ func (n *Native) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if printerName, _, jobURI := strings.Cut(name, "/jobs/"); jobURI {
 		name = printerName
 	}
+	// Re-read preferences when a client opens its print sheet. Do not hold the
+	// queue mutex while Windows queries drivers, or block uploads/job polling.
+	if req.Code == 0x000b {
+		n.refreshPrinters(r.Context())
+	}
 	n.mu.Lock()
-	p, ok := n.printers[name]
+	p, ok := n.printerForResource(name)
 	if !ok || n.closed {
 		resp.Code = 0x0406
+		resp.Operation = append(resp.Operation, ippAttr("status-message", goipp.TagText,
+			goipp.String("This printer is no longer shared. Select the printer again.")))
 	} else {
 		n.handleIPP(r, &req, &resp, p)
 	}
 	n.mu.Unlock()
+	slog.Debug("AirPrint request", "printer", p.Name, "resource", name, "client", r.RemoteAddr,
+		"operation", goipp.Op(req.Code).String(), "status", goipp.Status(resp.Code).String())
 	w.Header().Set("Content-Type", "application/ipp")
-	_ = resp.Encode(w)
+	if err := resp.Encode(w); err != nil {
+		slog.Warn("AirPrint response failed", "printer", name, "err", err)
+	}
 }
 
 func (n *Native) handleIPP(r *http.Request, req, resp *goipp.Message, p Printer) {
@@ -311,9 +375,9 @@ func (n *Native) handleIPP(r *http.Request, req, resp *goipp.Message, p Printer)
 	case 0x000b: // Get-Printer-Attributes
 		resp.Printer = n.printerAttributes(p, uri)
 	case 0x0004: // Validate-Job
-		resp.Code = n.validateJob(req)
+		resp.Code = n.validateJob(req, resp, p)
 	case 0x0002, 0x0005: // Print-Job / Create-Job
-		if resp.Code = n.validateJob(req); resp.Code != 0 {
+		if resp.Code = n.validateJob(req, resp, p); resp.Code != 0 {
 			return
 		}
 		pending := 0
@@ -330,10 +394,11 @@ func (n *Native) handleIPP(r *http.Request, req, resp *goipp.Message, p Printer)
 			return
 		}
 		n.nextID++
+		paper, _ := requestedPaper(req.Job, p) // validated above
 		j := &nativeJob{ID: n.nextID, State: 4, Created: time.Now(), Document: Document{ID: n.nextID, Printer: p.Name,
 			Title: ippString(req.Operation, "job-name", "AirPrint document"), Owner: ippString(req.Operation, "requesting-user-name", "AirPrint"),
 			Format: ippString(req.Operation, "document-format", "application/octet-stream"), Copies: ippInt(req.Job, "copies", 1),
-			Orientation: ippInt(req.Job, "orientation-requested", 3), Media: ippString(req.Job, "media", "")}}
+			Orientation: ippInt(req.Job, "orientation-requested", 3), Media: ippString(req.Job, "media", ""), Paper: paper}}
 		n.jobs[j.ID] = j
 		if req.Code == 0x0002 {
 			resp.Code = n.receiveDocument(r, req, j)
@@ -349,7 +414,7 @@ func (n *Native) handleIPP(r *http.Request, req, resp *goipp.Message, p Printer)
 			resp.Code = 0x0501
 			return
 		}
-		if resp.Code = n.validateJob(req); resp.Code != 0 {
+		if resp.Code = n.validateJob(req, resp, p); resp.Code != 0 {
 			return
 		}
 		resp.Code = n.receiveDocument(r, req, j)
@@ -389,7 +454,7 @@ func (n *Native) handleIPP(r *http.Request, req, resp *goipp.Message, p Printer)
 	}
 }
 
-func (n *Native) validateJob(req *goipp.Message) goipp.Code {
+func (n *Native) validateJob(req, resp *goipp.Message, p Printer) goipp.Code {
 	format := ippString(req.Operation, "document-format", "application/octet-stream")
 	if format != "application/octet-stream" && !strings.Contains(","+nativeFormats+",", ","+format+",") {
 		return 0x040a
@@ -401,6 +466,15 @@ func (n *Native) validateJob(req *goipp.Message) goipp.Code {
 		return 0x040b
 	}
 	if sides := ippString(req.Job, "sides", "one-sided"); sides != "one-sided" {
+		return 0x040b
+	}
+	if _, err := requestedPaper(req.Job, p); err != nil {
+		for _, a := range req.Job {
+			if a.Name == "media" || a.Name == "media-col" {
+				resp.Unsupported = append(resp.Unsupported, a)
+			}
+		}
+		resp.Operation = append(resp.Operation, ippAttr("status-message", goipp.TagText, goipp.String(err.Error())))
 		return 0x040b
 	}
 	return 0
@@ -436,6 +510,9 @@ func (n *Native) receiveDocument(r *http.Request, req *goipp.Message, j *nativeJ
 		err = errors.New("empty document")
 	}
 	if err != nil || j.State == 7 || n.closed {
+		if err != nil {
+			slog.Warn("AirPrint document upload failed", "printer", j.Printer, "job", j.ID, "err", err)
+		}
 		_ = os.Remove(path)
 		if j.State != 7 {
 			j.State = 8
@@ -448,6 +525,7 @@ func (n *Native) receiveDocument(r *http.Request, req *goipp.Message, j *nativeJ
 	j.Path = path
 	j.Size = size
 	j.State = 3
+	slog.Info("AirPrint document received", "printer", j.Printer, "job", j.ID, "format", j.Format, "bytes", size)
 	ctx, cancel := context.WithCancel(n.ctx)
 	j.Cancel = cancel
 	n.wg.Add(1)
@@ -483,6 +561,11 @@ func (n *Native) runJob(ctx context.Context, id int) {
 			doc := j.Document
 			n.mu.Unlock()
 			err := n.Print(ctx, doc)
+			if err != nil {
+				slog.Error("AirPrint print failed", "printer", doc.Printer, "job", id, "format", doc.Format, "err", err)
+			} else {
+				slog.Info("AirPrint job sent to Windows", "printer", doc.Printer, "job", id)
+			}
 			_ = os.Remove(doc.Path)
 			n.mu.Lock()
 			if j.State != 7 {
@@ -532,16 +615,6 @@ func (n *Native) printerAttributes(p Printer, uri string) goipp.Attributes {
 			}
 		}
 	}
-	w, h := p.MediaWidth, p.MediaHeight
-	if w == 0 || h == 0 {
-		w, h = 21000, 29700
-	}
-	media := fmt.Sprintf("custom_paper_%gx%gmm", float64(w)/100, float64(h)/100)
-	size := goipp.Collection{ippAttr("x-dimension", goipp.TagInteger, goipp.Integer(w)), ippAttr("y-dimension", goipp.TagInteger, goipp.Integer(h))}
-	col := goipp.Collection{ippAttr("media-size", goipp.TagBeginCollection, size), ippAttr("media-size-name", goipp.TagKeyword, goipp.String(media)), ippAttr("media-type", goipp.TagKeyword, goipp.String("stationery")), ippAttr("media-source", goipp.TagKeyword, goipp.String("auto"))}
-	for _, edge := range []string{"bottom", "left", "right", "top"} {
-		col = append(col, ippAttr("media-"+edge+"-margin", goipp.TagInteger, goipp.Integer(0)))
-	}
 	attrs := goipp.Attributes{
 		ippAttr("printer-uri-supported", goipp.TagURI, goipp.String(uri)), ippAttr("uri-authentication-supported", goipp.TagKeyword, goipp.String("none")), ippAttr("uri-security-supported", goipp.TagKeyword, goipp.String("none")),
 		ippAttr("printer-name", goipp.TagName, goipp.String(p.Name)), ippAttr("printer-info", goipp.TagText, goipp.String(p.Label())), ippAttr("printer-location", goipp.TagText, goipp.String(p.Location)), ippAttr("printer-make-and-model", goipp.TagText, goipp.String(p.Model)),
@@ -553,19 +626,17 @@ func (n *Native) printerAttributes(p Printer, uri string) goipp.Attributes {
 		ippAttr("compression-supported", goipp.TagKeyword, goipp.String("none")), ippAttr("copies-default", goipp.TagInteger, goipp.Integer(1)), ippAttr("copies-supported", goipp.TagRange, goipp.Range{Lower: 1, Upper: 99}), ippAttr("multiple-document-jobs-supported", goipp.TagBoolean, goipp.Boolean(false)),
 		ippAttr("sides-default", goipp.TagKeyword, goipp.String("one-sided")), ippAttr("sides-supported", goipp.TagKeyword, goipp.String("one-sided")), ippAttr("color-supported", goipp.TagBoolean, goipp.Boolean(p.Color)),
 		ippAttr("printer-resolution-default", goipp.TagResolution, goipp.Resolution{Xres: 300, Yres: 300, Units: goipp.UnitsDpi}), ippAttr("printer-resolution-supported", goipp.TagResolution, goipp.Resolution{Xres: 300, Yres: 300, Units: goipp.UnitsDpi}), ippAttr("urf-supported", goipp.TagKeyword, goipp.String("W8"), goipp.String("SRGB24"), goipp.String("RS300")),
-		ippAttr("media-default", goipp.TagKeyword, goipp.String(media)), ippAttr("media-supported", goipp.TagKeyword, goipp.String(media)), ippAttr("media-col-default", goipp.TagBeginCollection, col), ippAttr("media-col-ready", goipp.TagBeginCollection, col), ippAttr("media-col-database", goipp.TagBeginCollection, col),
-		ippAttr("media-col-supported", goipp.TagKeyword, goipp.String("media-size"), goipp.String("media-size-name"), goipp.String("media-type"), goipp.String("media-source"), goipp.String("media-bottom-margin"), goipp.String("media-left-margin"), goipp.String("media-right-margin"), goipp.String("media-top-margin")),
 		ippAttr("orientation-requested-default", goipp.TagEnum, goipp.Integer(3)), ippAttr("orientation-requested-supported", goipp.TagEnum, goipp.Integer(3), goipp.Integer(4)), ippAttr("print-quality-default", goipp.TagEnum, goipp.Integer(4)), ippAttr("print-quality-supported", goipp.TagEnum, goipp.Integer(4)),
-		ippAttr("job-creation-attributes-supported", goipp.TagKeyword, goipp.String("copies"), goipp.String("media"), goipp.String("orientation-requested"), goipp.String("sides")),
-		ippAttr("media-ready", goipp.TagKeyword, goipp.String(media)), ippAttr("media-type-supported", goipp.TagKeyword, goipp.String("stationery")), ippAttr("media-source-supported", goipp.TagKeyword, goipp.String("auto")),
+		ippAttr("job-creation-attributes-supported", goipp.TagKeyword, goipp.String("copies"), goipp.String("media"), goipp.String("media-col"), goipp.String("orientation-requested"), goipp.String("sides")),
 		ippAttr("pdf-versions-supported", goipp.TagKeyword, goipp.String("adobe-1.3"), goipp.String("adobe-1.4"), goipp.String("adobe-1.5"), goipp.String("adobe-1.6"), goipp.String("adobe-1.7")),
 		ippAttr("job-hold-until-default", goipp.TagKeyword, goipp.String("no-hold")), ippAttr("job-hold-until-supported", goipp.TagKeyword, goipp.String("no-hold")), ippAttr("job-priority-default", goipp.TagInteger, goipp.Integer(1)), ippAttr("job-priority-supported", goipp.TagInteger, goipp.Integer(1)),
-		ippAttr("job-sheets-default", goipp.TagKeyword, goipp.String("none")), ippAttr("job-sheets-supported", goipp.TagKeyword, goipp.String("none")), ippAttr("multiple-document-handling-default", goipp.TagKeyword, goipp.String("single-document")), ippAttr("multiple-document-handling-supported", goipp.TagKeyword, goipp.String("single-document")),
+		ippAttr("job-sheets-default", goipp.TagKeyword, goipp.String("none")), ippAttr("job-sheets-supported", goipp.TagKeyword, goipp.String("none")), ippAttr("multiple-document-handling-default", goipp.TagKeyword, goipp.String("separate-documents-collated-copies")), ippAttr("multiple-document-handling-supported", goipp.TagKeyword, goipp.String("separate-documents-collated-copies")),
 	}
 	mode := "monochrome"
 	if p.Color {
 		mode = "color"
 	}
 	attrs = append(attrs, ippAttr("print-color-mode-default", goipp.TagKeyword, goipp.String(mode)), ippAttr("print-color-mode-supported", goipp.TagKeyword, goipp.String(mode)))
+	attrs = append(attrs, paperAttributes(p)...)
 	return attrs
 }

@@ -57,20 +57,39 @@ for ($i=0; $i -lt $pdf.PageCount; $i++) {
 
 // PrintDocument sends rendered pages through the installed Windows driver.
 // A StandardPrintController prevents print dialogs from blocking the queue.
-const windowsPrintPages = `
+const windowsPrintHelper = `
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
 using System;
 using System.IO;
 using System.Drawing;
 using System.Drawing.Printing;
 public static class IsoBurnerPrint {
-    public static void Run(string printer, string title, string folder, int copies, bool landscape, string output) {
+    public static PaperSize SelectPaper(PrinterSettings settings, int id, int width, int height) {
+        PaperSize current = settings.DefaultPageSettings.PaperSize;
+        if (width <= 0 || height <= 0) return current;
+        // Keep the driver's form, including its private ID. Constructing an
+        // anonymous custom PaperSize loses label-driver settings.
+        if (Matches(current, id, width, height)) return current;
+        foreach (PaperSize paper in settings.PaperSizes) {
+            if (Matches(paper, id, width, height)) return paper;
+        }
+        throw new Exception("The selected paper size is no longer available. Reopen the print sheet to refresh printer settings.");
+    }
+    private static bool Matches(PaperSize paper, int id, int width, int height) {
+        return (id == 0 || paper.RawKind == id) &&
+            Math.Abs(paper.Width * 25.4 - width) <= 13 &&
+            Math.Abs(paper.Height * 25.4 - height) <= 13;
+    }
+    public static void Run(string printer, string title, string folder, int copies, bool landscape, string output,
+                           int paperID, int paperWidth, int paperHeight) {
         string[] pages = Directory.GetFiles(folder);
         Array.Sort(pages, StringComparer.Ordinal);
         if (pages.Length == 0) throw new Exception("The document has no printable pages.");
         using (PrintDocument doc = new PrintDocument()) {
             doc.PrinterSettings.PrinterName = printer;
             if (!doc.PrinterSettings.IsValid) throw new Exception("The selected Windows printer is unavailable.");
+            doc.DefaultPageSettings = (PageSettings)doc.PrinterSettings.DefaultPageSettings.Clone();
+            doc.DefaultPageSettings.PaperSize = SelectPaper(doc.PrinterSettings, paperID, paperWidth, paperHeight);
             doc.DocumentName = title;
             doc.PrintController = new StandardPrintController();
             doc.PrinterSettings.Copies = (short)copies;
@@ -97,8 +116,12 @@ public static class IsoBurnerPrint {
     }
 }
 '@
+`
+
+const windowsPrintPages = windowsPrintHelper + `
 [IsoBurnerPrint]::Run($env:ISO_BURNER_PRINTER,$env:ISO_BURNER_TITLE,$env:ISO_BURNER_PAGES,
-    [int]$env:ISO_BURNER_COPIES,($env:ISO_BURNER_LANDSCAPE -eq 'true'),$env:ISO_BURNER_PRINT_OUTPUT)
+    [int]$env:ISO_BURNER_COPIES,($env:ISO_BURNER_LANDSCAPE -eq 'true'),$env:ISO_BURNER_PRINT_OUTPUT,
+    [int]$env:ISO_BURNER_PAPER_ID,[int]$env:ISO_BURNER_PAPER_WIDTH,[int]$env:ISO_BURNER_PAPER_HEIGHT)
 `
 
 func printWindowsDocument(ctx context.Context, doc Document) error {
@@ -111,7 +134,8 @@ func printWindowsDocument(ctx context.Context, doc Document) error {
 		return err
 	}
 	_, err = queryWindowsPrinter(ctx, windowsPrintPages, "ISO_BURNER_PRINTER="+doc.Printer, "ISO_BURNER_TITLE="+doc.Title,
-		"ISO_BURNER_PAGES="+dir, "ISO_BURNER_COPIES="+strconv.Itoa(doc.Copies), "ISO_BURNER_LANDSCAPE="+strconv.FormatBool(doc.Orientation == 4), "ISO_BURNER_PRINT_OUTPUT=")
+		"ISO_BURNER_PAGES="+dir, "ISO_BURNER_COPIES="+strconv.Itoa(doc.Copies), "ISO_BURNER_LANDSCAPE="+strconv.FormatBool(doc.Orientation == 4), "ISO_BURNER_PRINT_OUTPUT=",
+		"ISO_BURNER_PAPER_ID="+strconv.Itoa(doc.Paper.WindowsID), "ISO_BURNER_PAPER_WIDTH="+strconv.Itoa(doc.Paper.Width), "ISO_BURNER_PAPER_HEIGHT="+strconv.Itoa(doc.Paper.Height))
 	return err
 }
 

@@ -14,16 +14,24 @@ import (
 	"strings"
 )
 
-// Printer is one local CUPS print queue.
+// PaperSize is a form reported by the printer driver. Dimensions are in
+// hundredths of a millimetre, as used by IPP.
+type PaperSize struct {
+	Name          string
+	Width, Height int
+	WindowsID     int // driver form ID; preserve it when selecting label stock
+}
+
+// Printer is one local print queue.
 type Printer struct {
 	// Name is the CUPS queue name, e.g. "HP_LaserJet_MFP_M141w".
-	Name     string
-	Info     string
-	Location string
-	Model    string
-	// Media dimensions are hundredths of a millimetre, as used by IPP.
-	MediaWidth, MediaHeight int
-	Color                   bool
+	Name         string
+	Info         string
+	Location     string
+	Model        string
+	DefaultPaper PaperSize
+	PaperSizes   []PaperSize
+	Color        bool
 	// Shared is whether this service shares the queue on the network.
 	Shared bool
 	// State is "idle", "printing" or "disabled".
