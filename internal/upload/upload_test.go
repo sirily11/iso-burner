@@ -320,6 +320,112 @@ func TestRunUploadsFilesInParallel(t *testing.T) {
 	}
 }
 
+func TestRunPreparesWhileThreeUploadsAreBusy(t *testing.T) {
+	needFFmpeg(t)
+	root := t.TempDir()
+	clip := filepath.Join(root, "clip0.mov")
+	ffmpeg(t, clip, "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=1", "-c:v", "mpeg4")
+	data, err := os.ReadFile(clip)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := make([]settings.File, 0, 6)
+	for i := range 3 {
+		files = append(files, settings.File{RelPath: fmt.Sprintf("file%d.txt", i), Size: 1})
+	}
+	for i := range 3 {
+		name := fmt.Sprintf("clip%d.mov", i)
+		if i > 0 {
+			if err := os.WriteFile(filepath.Join(root, name), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		files = append(files, settings.File{RelPath: name, Size: int64(len(data))})
+	}
+
+	arrived := make(chan struct{}, 3)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseUploads := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseUploads()
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/items/item1/contents":
+			arrived <- struct{}{}
+			<-release
+			w.WriteHeader(http.StatusCreated)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/upload/content-preview":
+			var req struct {
+				Items []remote.PreviewRequest `json:"items"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			out := make([]remote.PreviewUpload, len(req.Items))
+			for i := range out {
+				out[i] = remote.PreviewUpload{ImageURL: srv.URL + "/thumb", VideoURL: srv.URL + "/video"}
+			}
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(out)
+		case r.Method == http.MethodPut:
+			io.Copy(io.Discard, r.Body)
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := NewProgress(files)
+	job := Job{Client: remote.NewClient(srv.URL, testToken{}), ItemID: "item1", Folder: root, Files: files}
+	done := make(chan error, 1)
+	go func() { done <- job.Run(context.Background(), p) }()
+	for range 3 {
+		select {
+		case <-arrived:
+		case err := <-done:
+			t.Fatalf("run stopped before three uploads: %v", err)
+		case <-time.After(15 * time.Second):
+			t.Fatal("three uploads did not start")
+		}
+	}
+	deadline := time.After(20 * time.Second)
+	for {
+		st := p.Snapshot()
+		ready, uploading := 0, 0
+		for _, s := range st {
+			if s.Stage == StageReady {
+				ready++
+			}
+			if s.Stage == StageUploading {
+				uploading++
+			}
+		}
+		if ready == 3 && uploading == 3 {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("run stopped before previews were prepared: %v; statuses: %+v", err, st)
+		case <-deadline:
+			t.Fatalf("expected 3 uploads and 3 prepared previews together; statuses: %+v", st)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	releaseUploads()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("run did not finish after uploads were released")
+	}
+	checkAllDone(t, p)
+}
+
 // flakyServer answers file content requests with the status fail returns for
 // each file's nth request, counting from 1, and 201 once it returns 0.
 func flakyServer(t *testing.T, fail func(file string, n int) int) (*remote.Client, func(file string) int) {
