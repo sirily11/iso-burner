@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -135,5 +136,45 @@ func TestCUPSShare(t *testing.T) {
 	err := CUPS{Run: f.run}.Share(context.Background(), []string{"A"})
 	if err == nil || !strings.Contains(err.Error(), "sudo") {
 		t.Fatalf("forbidden share should suggest sudo, got %v", err)
+	}
+}
+
+func TestAdvertise(t *testing.T) {
+	p := Printer{Name: "HP_1", Info: "Office HP", Model: "HP LaserJet", Location: "Lobby"}
+	var got []string
+	c := CUPS{OS: "darwin", Serve: func(ctx context.Context, name string, args ...string) error {
+		got = append([]string{name}, args...)
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error)
+	go func() { done <- c.Advertise(ctx, p) }()
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("cancelling should stop advertising cleanly, got %v", err)
+	}
+	head := []string{"dns-sd", "-R", "Office HP (AirPrint)", "_ipp._tcp,_universal", "local.", "631"}
+	if !reflect.DeepEqual(got[:len(head)], head) {
+		t.Fatalf("command = %q", got)
+	}
+	txt := strings.Join(got[len(head):], " ")
+	for _, want := range []string{"rp=printers/HP_1", "URF=", "pdl=application/pdf,image/urf", "ty=HP LaserJet", "note=Lobby"} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("TXT record missing %q: %s", want, txt)
+		}
+	}
+
+	name, args, err := advertiseCommand("linux", p)
+	if err != nil || name != "avahi-publish" || !slices.Contains(args, "_universal._sub._ipp._tcp") {
+		t.Fatalf("linux command = %s %q, %v", name, args, err)
+	}
+	if _, _, err := advertiseCommand("windows", p); err == nil {
+		t.Fatal("windows should be unsupported")
+	}
+
+	c.Serve = func(context.Context, string, ...string) error { return errors.New("dns-sd: boom") }
+	if err := c.Advertise(context.Background(), p); err == nil || !strings.Contains(err.Error(), "boom") {
+		t.Fatalf("a failing advertiser should report its error, got %v", err)
 	}
 }

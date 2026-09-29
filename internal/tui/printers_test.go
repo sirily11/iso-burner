@@ -5,7 +5,9 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -14,11 +16,14 @@ import (
 
 // fakePrinters is an in-memory printer.Service.
 type fakePrinters struct {
-	printers []printer.Printer
-	queues   map[string]printer.Queue
-	shareErr error
-	shared   []string
-	unshared []string
+	printers     []printer.Printer
+	queues       map[string]printer.Queue
+	shareErr     error
+	advertiseErr map[string]error
+	mu           sync.Mutex
+	advertising  map[string]bool
+	shared       []string
+	unshared     []string
 }
 
 func (f *fakePrinters) List(context.Context) ([]printer.Printer, error) {
@@ -36,6 +41,34 @@ func (f *fakePrinters) Share(_ context.Context, names []string) error {
 func (f *fakePrinters) Unshare(_ context.Context, names []string) error {
 	f.unshared = append(f.unshared, names...)
 	return nil
+}
+
+func (f *fakePrinters) Advertise(ctx context.Context, p printer.Printer) error {
+	if err := f.advertiseErr[p.Name]; err != nil {
+		return err
+	}
+	f.mu.Lock()
+	if f.advertising == nil {
+		f.advertising = map[string]bool{}
+	}
+	f.advertising[p.Name] = true
+	f.mu.Unlock()
+	<-ctx.Done()
+	f.mu.Lock()
+	delete(f.advertising, p.Name)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakePrinters) advertised() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for name := range f.advertising {
+		out = append(out, name)
+	}
+	slices.Sort(out)
+	return out
 }
 
 func (f *fakePrinters) Queue(_ context.Context, name string) (printer.Queue, error) {
@@ -63,20 +96,35 @@ func newFakePrinters() *fakePrinters {
 	}
 }
 
-// sendPrinter delivers msg and runs the returned command chain until it stops
-// producing printer messages, skipping refresh ticks so tests do not wait.
+// sendPrinter delivers msg and runs the returned commands until they stop
+// producing printer messages. Refresh ticks are skipped so tests do not wait,
+// and commands still running after a moment, like AirPrint adverts, are left
+// running until the adverts are stopped.
 func sendPrinter(t *testing.T, m Model, msg tea.Msg) Model {
 	t.Helper()
 	next, cmd := m.Update(msg)
 	m = next.(Model)
-	for cmd != nil {
-		out := cmd()
-		switch out.(type) {
-		case printersLoadedMsg, printersSharedMsg, queuesLoadedMsg:
-			next, cmd = m.Update(out)
+	pending := []tea.Cmd{cmd}
+	for len(pending) > 0 {
+		cmd, pending = pending[0], pending[1:]
+		if cmd == nil {
+			continue
+		}
+		out := make(chan tea.Msg, 1)
+		go func() { out <- cmd() }()
+		var res tea.Msg
+		select {
+		case res = <-out:
+		case <-time.After(100 * time.Millisecond):
+			continue
+		}
+		switch res := res.(type) {
+		case tea.BatchMsg:
+			pending = append(pending, res...)
+		case printersLoadedMsg, printersSharedMsg, queuesLoadedMsg, advertiseEndedMsg:
+			next, cmd = m.Update(res)
 			m = next.(Model)
-		default:
-			return m
+			pending = append(pending, cmd)
 		}
 	}
 	return m
@@ -190,5 +238,48 @@ func TestPrinterUnshareAll(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "Stopped sharing 1 printer(s)") {
 		t.Fatalf("missing notice:\n%s", m.View())
+	}
+}
+
+func TestPrinterAirPrintAdverts(t *testing.T) {
+	svc := newFakePrinters()
+	svc.advertiseErr = map[string]error{"Brother": errors.New("dns-sd not found")}
+	m := openPrinterMode(t, svc)
+	m = sendPrinter(t, m, key(" ")) // tick HP; Canon is already shared
+	m = sendPrinter(t, m, key("down"))
+	m = sendPrinter(t, m, key("down"))
+	m = sendPrinter(t, m, key(" ")) // tick Brother
+	m = sendPrinter(t, m, key("enter"))
+	if got := svc.advertised(); !slices.Equal(got, []string{"Canon", "HP"}) {
+		t.Fatalf("advertising %v, want Canon and HP", got)
+	}
+	if !strings.Contains(m.View(), "dns-sd not found") {
+		t.Fatalf("a failed advert should show on its printer:\n%s", m.View())
+	}
+	m = sendPrinter(t, m, key("enter"))
+	if !strings.Contains(m.View(), "Office HP (AirPrint)") {
+		t.Fatalf("details should show the AirPrint name:\n%s", m.View())
+	}
+
+	// Leaving printer mode keeps advertising; coming back and unsharing HP
+	// replaces the adverts.
+	m = sendPrinter(t, m, key("esc"))
+	m = sendPrinter(t, m, key("esc"))
+	m = sendPrinter(t, m, key("esc"))
+	m = sendPrinter(t, m, key("4"))
+	if got := svc.advertised(); len(got) != 2 {
+		t.Fatalf("adverts should outlive leaving printer mode, got %v", got)
+	}
+	m.printers.printers[0].Shared = true // the fake does not persist sharing
+	m.printers.printers[2].Shared = true
+	m.printers.selected = map[string]bool{"Canon": true}
+	m = sendPrinter(t, m, key("enter"))
+	if got := svc.advertised(); !slices.Equal(got, []string{"Canon"}) {
+		t.Fatalf("after unsharing HP, advertising %v", got)
+	}
+
+	m.StopAdvertising()
+	if got := svc.advertised(); len(got) != 0 {
+		t.Fatalf("StopAdvertising should end every advert, still %v", got)
 	}
 }
