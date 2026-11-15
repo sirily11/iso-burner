@@ -43,6 +43,30 @@ func TestUploadModeSignedIn(t *testing.T) {
 	}
 }
 
+func TestDiscUploadShowsDriveAndLoadedDiscName(t *testing.T) {
+	m := New(Options{Mode: ModeUpload})
+	item := remote.Item{ID: "item", Title: "Archive"}
+	m.itemSearch.chosen = &item
+	m.uploadFiles = uploadFiles{
+		rule: ruleDisc, stage: uploadStageReview,
+		disc:      drive.Drive{ID: "E:", Vendor: "ASUS", Model: "BW-16D1HT"},
+		discLabel: "PHOTO_BACKUP", folder: `E:\`,
+		matched: []settings.File{{RelPath: "photo.jpg", Size: 3}},
+	}
+	for _, want := range []string{"E:", "ASUS BW-16D1HT", "PHOTO_BACKUP"} {
+		if !strings.Contains(m.View(), want) {
+			t.Errorf("review missing %q:\n%s", want, m.View())
+		}
+	}
+	m.uploadFiles.stage = uploadStageRunning
+	m.uploadFiles.run = uploadRun{job: upload.Job{Files: m.uploadFiles.matched}, statuses: []upload.FileStatus{{}}}
+	for _, want := range []string{"E:", "PHOTO_BACKUP"} {
+		if !strings.Contains(m.View(), want) {
+			t.Errorf("progress missing %q:\n%s", want, m.View())
+		}
+	}
+}
+
 func TestUploadModeSignsInFirst(t *testing.T) {
 	svc := &fakeAuth{}
 	m := New(Options{Auth: svc, Sync: newItemServer(t, sampleItems).client})

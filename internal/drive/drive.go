@@ -28,6 +28,8 @@ type Drive struct {
 	Model  string
 	// Detail is extra platform information such as the bus or loaded media.
 	Detail string
+	// VolumeLabel is the name of the disc currently mounted in the drive.
+	VolumeLabel string
 }
 
 // Name is a human-readable label for the drive.
@@ -56,11 +58,30 @@ func List(ctx context.Context) ([]Drive, error) {
 		if err != nil {
 			return nil, fmt.Errorf("query Win32_CDROMDrive: %w", err)
 		}
-		return parseWindows(out)
+		drives, err := parseWindows(out)
+		if err != nil {
+			return nil, err
+		}
+		populateWindowsVolumeLabels(drives, windowsVolumeLabel)
+		return drives, nil
 	case "linux":
 		return listSysBlock("/sys/block")
 	}
 	return nil, fmt.Errorf("listing disc drives is not supported on %s", runtime.GOOS)
+}
+
+// populateWindowsVolumeLabels reads the filesystem label from each loaded
+// disc. Win32_LogicalDisk.VolumeName can be empty for optical media even
+// while Windows Explorer shows the label.
+func populateWindowsVolumeLabels(drives []Drive, lookup func(string) string) {
+	for i := range drives {
+		if drives[i].Detail != "disc loaded" {
+			continue
+		}
+		if label := lookup(drives[i].ID); label != "" {
+			drives[i].VolumeLabel = label
+		}
+	}
 }
 
 // parseDrutil parses `drutil list`, whose rows line up under a header like:
@@ -118,6 +139,7 @@ func parseWindows(out []byte) ([]Drive, error) {
 		Caption      string
 		Manufacturer string
 		MediaLoaded  bool
+		VolumeName   string
 	}
 	out = []byte(strings.TrimSpace(string(out)))
 	if len(out) == 0 || string(out) == "null" {
@@ -146,7 +168,11 @@ func parseWindows(out []byte) ([]Drive, error) {
 		if strings.HasPrefix(vendor, "(") { // "(Standard CD-ROM drives)"
 			vendor = ""
 		}
-		drives = append(drives, Drive{ID: r.Drive, Vendor: vendor, Model: r.Caption, Detail: detail})
+		label := ""
+		if r.MediaLoaded {
+			label = strings.TrimSpace(r.VolumeName)
+		}
+		drives = append(drives, Drive{ID: r.Drive, Vendor: vendor, Model: r.Caption, Detail: detail, VolumeLabel: label})
 	}
 	return drives, nil
 }

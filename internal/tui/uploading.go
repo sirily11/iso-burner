@@ -216,6 +216,12 @@ func (m Model) uploadRunView() string {
 	failed := counts[upload.StageFailed]
 
 	item := itemLabel(*m.itemSearch.chosen)
+	if m.uploadFiles.rule == ruleDisc {
+		b.WriteString(labelStyle.Render("Drive") + "  " + m.uploadFiles.disc.ID + " · " + m.uploadFiles.disc.Name() + "\n")
+		if m.uploadFiles.discLabel != "" {
+			b.WriteString(labelStyle.Render("Disc") + "  " + m.uploadFiles.discLabel + "\n")
+		}
+	}
 	switch {
 	case r.cancelling && r.running:
 		b.WriteString(errorStyle.Render("Cancelling… finishing the current step") + "\n")

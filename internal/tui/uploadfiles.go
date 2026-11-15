@@ -60,14 +60,15 @@ type uploadFiles struct {
 	pattern   textinput.Model
 	drives    DriveSelector
 
-	folder  string      // chosen folder, for ruleFolder, or where the disc is mounted for ruleDisc
-	iso     string      // chosen ISO image, for ruleISO
-	disc    drive.Drive // chosen drive, for ruleDisc
-	all     []settings.File
-	matched []settings.File // the files to upload
-	loading bool            // the folder is being scanned or the ISO read
-	offset  int             // first file shown on the review screen
-	err     error
+	folder    string      // chosen folder, for ruleFolder, or where the disc is mounted for ruleDisc
+	iso       string      // chosen ISO image, for ruleISO
+	disc      drive.Drive // chosen drive, for ruleDisc
+	discLabel string      // loaded disc's volume name, when available
+	all       []settings.File
+	matched   []settings.File // the files to upload
+	loading   bool            // the folder is being scanned or the ISO read
+	offset    int             // first file shown on the review screen
+	err       error
 
 	conflicts uploadConflicts // files the item already has, asked about before uploading
 	run       uploadRun       // the upload, once started from the review screen
@@ -92,6 +93,7 @@ func listISOCmd(path string) tea.Cmd {
 type discFilesMsg struct {
 	driveID string
 	root    string
+	label   string
 	files   []settings.File
 	err     error
 }
@@ -110,7 +112,7 @@ func (m Model) listDiscCmd(d drive.Drive) tea.Cmd {
 		if err != nil {
 			err = fmt.Errorf("read disc at %s: %w", root, err)
 		}
-		return discFilesMsg{driveID: d.ID, root: root, files: files, err: err}
+		return discFilesMsg{driveID: d.ID, root: root, label: cmp.Or(drive.DiscLabel(ctx, d, root), d.VolumeLabel), files: files, err: err}
 	}
 }
 
@@ -177,7 +179,7 @@ func (m Model) updateUploadFiles(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case len(msg.files) == 0:
 			f.err = errors.New("the disc has no files")
 		default:
-			f.folder, f.all, f.matched = msg.root, msg.files, msg.files
+			f.folder, f.discLabel, f.all, f.matched = msg.root, msg.label, msg.files, msg.files
 			f.stage, f.offset = uploadStageReview, 0
 		}
 		return m, nil
@@ -397,6 +399,9 @@ func (m Model) uploadFilesView() string {
 		}
 	case uploadStageDrive:
 		b.WriteString(f.drives.body())
+		if f.disc.ID != "" {
+			b.WriteString("\n" + labelStyle.Render("Selected drive") + "  " + f.disc.ID + " · " + f.disc.Name() + "\n")
+		}
 		if f.loading {
 			b.WriteString("\n" + dimStyle.Render("Reading disc…") + "\n")
 		}
@@ -429,7 +434,11 @@ func (m Model) uploadReviewView() string {
 	case ruleISO:
 		row("ISO", f.iso)
 	case ruleDisc:
-		row("Disc", f.disc.Name()+"  "+dimStyle.Render(f.folder))
+		row("Drive", f.disc.ID+" · "+f.disc.Name())
+		if f.discLabel != "" {
+			row("Disc", f.discLabel)
+		}
+		row("Mounted", dimStyle.Render(f.folder))
 	default:
 		row("Folder", f.folder)
 		row("Regex", cmp.Or(f.pattern.Value(), ".*"))

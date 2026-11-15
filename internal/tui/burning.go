@@ -45,6 +45,15 @@ func (m *Model) offerResume() {
 		m.resumeErr = err
 		return
 	}
+	// An unfinished burn from another directory remains in the database, but
+	// must not take over the ISO picker for the directory being browsed.
+	if m.isoFolderExplicit && m.isoPicker.dir != "" {
+		for _, d := range discs {
+			if !sameFolder(filepath.Dir(d.ISOPath), m.isoPicker.dir) {
+				return
+			}
+		}
+	}
 	m.resumeOffer, m.resumeDiscs = sess, discs
 }
 
@@ -66,6 +75,9 @@ func (m Model) updateResume(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.resumeErr = err
 			return m, nil
 		}
+		m.resumeOffer = nil
+		return m, nil
+	case "b":
 		m.resumeOffer = nil
 		return m, nil
 	case "esc", "q":
@@ -120,7 +132,7 @@ func (m Model) resumeView() string {
 }
 
 func (m Model) resumeHelp() string {
-	return "enter: resume · n: discard and start a new burn · esc: back"
+	return "enter: resume · b: browse ISOs · n: discard old burn · esc: back"
 }
 
 // startBurning records the session in the database and starts burning with
@@ -435,7 +447,7 @@ func (m Model) burnProgressView() string {
 
 	driveWidth, nameWidth := 0, 0
 	for _, d := range s.Drives {
-		driveWidth = max(driveWidth, len([]rune(driveLetter(d.Drive.ID))))
+		driveWidth = max(driveWidth, len([]rune(d.Drive.ID)))
 		nameWidth = max(nameWidth, len([]rune(d.Drive.Name())))
 	}
 	nameWidth = min(nameWidth, 24)
@@ -463,7 +475,7 @@ func (m Model) burnProgressView() string {
 			pct, state = 0, dimStyle.Render("stopped")
 		}
 		name := fmt.Sprintf("%-*s", nameWidth, truncate(d.Drive.Name(), nameWidth))
-		b.WriteString(fmt.Sprintf("  %-*s · %s %s %3.0f%%  %s\n", driveWidth, driveLetter(d.Drive.ID), name, bar.ViewAs(pct), pct*100, state))
+		b.WriteString(fmt.Sprintf("  %-*s · %s %s %3.0f%%  %s\n", driveWidth, d.Drive.ID, name, bar.ViewAs(pct), pct*100, state))
 		if d.Err != "" && d.State != store.DriveFinished {
 			b.WriteString("  " + errorStyle.Render("  ✗ "+truncate(d.Err, 80)) + "\n")
 		}
@@ -507,7 +519,7 @@ func (m Model) burnedDiscsView() string {
 	for _, d := range m.burnDiscs {
 		if d.Status == store.DiscDone {
 			done = append(done, d)
-			width = max(width, len(driveLetter(d.DriveID)))
+			width = max(width, len(d.DriveID))
 		}
 	}
 	if len(done) == 0 {
@@ -516,7 +528,7 @@ func (m Model) burnedDiscsView() string {
 	var b strings.Builder
 	b.WriteString("\n" + labelStyle.Render("Burned discs") + "\n")
 	for _, d := range done {
-		line := fmt.Sprintf("  %-*s  💿 %s", width, driveLetter(d.DriveID), discLabel(&d))
+		line := fmt.Sprintf("  %-*s  💿 %s", width, d.DriveID, discLabel(&d))
 		if d.VerifyNote != "" {
 			b.WriteString(line + "  " + errorStyle.Render("⚠ "+truncate(d.VerifyNote, 60)) + "\n")
 		} else {
@@ -524,6 +536,18 @@ func (m Model) burnedDiscsView() string {
 		}
 	}
 	return b.String()
+}
+
+// BurnedDiscs returns the completed disc and drive assignments for the final
+// command-line summary.
+func (m Model) BurnedDiscs() []store.Disc {
+	var done []store.Disc
+	for _, d := range m.burnDiscs {
+		if d.Status == store.DiscDone {
+			done = append(done, d)
+		}
+	}
+	return done
 }
 
 func (m Model) burningHelp() string {

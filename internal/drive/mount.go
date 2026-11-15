@@ -13,6 +13,14 @@ import (
 	"strings"
 )
 
+// DiscLabel returns the mounted disc's volume name when available.
+func DiscLabel(ctx context.Context, d Drive, root string) string {
+	if runtime.GOOS == "windows" {
+		return windowsVolumeLabel(d.ID)
+	}
+	return filepath.Base(root)
+}
+
 // ErrNotMounted means the drive has no disc, or the disc in it has not been
 // mounted by the system yet.
 var ErrNotMounted = errors.New("no mounted disc in the drive: insert a disc and wait for it to appear")

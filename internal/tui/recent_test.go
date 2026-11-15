@@ -1,14 +1,36 @@
 package tui
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
+	"github.com/sirily11/iso-burner/internal/drive"
 	"github.com/sirily11/iso-burner/internal/recent"
 	"github.com/sirily11/iso-burner/internal/settings"
+	"github.com/sirily11/iso-burner/internal/store"
 )
+
+func TestChangingISOFolderIgnoresOldChoicesAndSession(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, "old/previous.iso", "new/current.iso")
+	oldDir, newDir := filepath.Join(root, "old"), filepath.Join(root, "new")
+	oldISO := filepath.Join(oldDir, "previous.iso")
+	st := testStore(t)
+	if _, err := st.CreateSession(context.Background(), []store.Job{{Path: oldISO, Size: 3, Copies: 1}}, []drive.Drive{{ID: "E:"}}); err != nil {
+		t.Fatal(err)
+	}
+	m := New(Options{Mode: ModeBurn, Folder: newDir, Recent: recent.Recent{ISODir: oldDir, ISOs: []string{oldISO}}, Store: st})
+	m = send(t, m, enter)
+	if m.resumeOffer != nil || len(m.isoPicker.selection()) != 0 || m.isoPicker.dir != newDir {
+		t.Fatalf("old folder leaked into new choice: resume=%v selected=%v dir=%q", m.resumeOffer, m.isoPicker.selection(), m.isoPicker.dir)
+	}
+	if sess, err := st.Unfinished(context.Background()); err != nil || sess == nil {
+		t.Fatalf("old session should remain available in database: session=%v err=%v", sess, err)
+	}
+}
 
 func TestGenerateRemembersSelections(t *testing.T) {
 	root := t.TempDir()

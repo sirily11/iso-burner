@@ -8,8 +8,11 @@ package upload
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -61,6 +64,9 @@ func (s FileStatus) Label() string {
 	case StageExtracting:
 		return "reading from ISO"
 	case StagePreparing:
+		if s.Kind == media.KindFile {
+			return "hashing original"
+		}
 		if s.Kind == media.KindVideo {
 			return "compressing"
 		}
@@ -408,24 +414,45 @@ func needsFFmpeg(files []settings.File) bool {
 	return false
 }
 
+// fileSHA256 streams the original file rather than loading it into memory.
+func fileSHA256(ctx context.Context, file string) (string, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	buf := make([]byte, 1024*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := f.Read(buf)
+		if n > 0 {
+			if _, writeErr := h.Write(buf[:n]); writeErr != nil {
+				return "", writeErr
+			}
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // upload adds file i to the item. Its title is the file name and its path the
 // one relative to the folder or ISO root.
 func (j Job) upload(ctx context.Context, src *source, tmp string, i int, f settings.File, p *Progress, prepareSlots, uploadSlots chan struct{}) error {
 	name := path.Base(f.RelPath)
 	kind := media.KindOf(name)
-	if kind == media.KindFile {
-		return runLimited(ctx, uploadSlots, func() error {
-			p.setStage(i, StageUploading)
-			return j.Client.CreateFileContent(ctx, j.ItemID, remote.FileContent{
-				Title:    name,
-				MimeType: media.MimeType(name),
-				Size:     f.Size,
-				FilePath: f.RelPath,
-			})
-		})
-	}
-
 	var prev media.Preview
+	var sum string
 	err := runLimited(ctx, prepareSlots, func() error {
 		local := filepath.Join(j.Folder, filepath.FromSlash(f.RelPath))
 		if src != nil {
@@ -441,27 +468,41 @@ func (j Job) upload(ctx context.Context, src *source, tmp string, i int, f setti
 
 		p.setStage(i, StagePreparing)
 		var err error
+		sum, err = fileSHA256(ctx, local)
+		if err != nil || kind == media.KindFile {
+			return err
+		}
 		prev, err = media.Prepare(ctx, local, tmp, func(v float64) { p.setFraction(i, v) })
 		return err
 	})
 	if err != nil {
 		return err
 	}
+	if kind == media.KindFile {
+		return runLimited(ctx, uploadSlots, func() error {
+			p.setStage(i, StageUploading)
+			return j.Client.CreateFileContent(ctx, j.ItemID, remote.FileContent{
+				Title: name, MimeType: media.MimeType(name), Size: f.Size,
+				SHA256: sum, FilePath: f.RelPath,
+			})
+		})
+	}
 	defer prev.Remove()
 	p.setStage(i, StageReady)
 	return runLimited(ctx, uploadSlots, func() error {
 		p.setStage(i, StageUploading)
-		return j.uploadPreview(ctx, i, f, name, kind, prev, p)
+		return j.uploadPreview(ctx, i, f, name, kind, sum, prev, p)
 	})
 }
 
-func (j Job) uploadPreview(ctx context.Context, i int, f settings.File, name string, kind media.Kind, prev media.Preview, p *Progress) error {
+func (j Job) uploadPreview(ctx context.Context, i int, f settings.File, name string, kind media.Kind, sum string, prev media.Preview, p *Progress) error {
 	req := remote.PreviewRequest{
 		Filename: name,
 		Type:     kind.String(),
 		Title:    name,
 		MimeType: prev.MimeType,
 		Size:     f.Size,
+		SHA256:   sum,
 		FilePath: f.RelPath,
 	}
 	if kind == media.KindVideo {
