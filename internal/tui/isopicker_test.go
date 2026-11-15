@@ -72,6 +72,17 @@ func TestISOPickerSelectsAllISOs(t *testing.T) {
 	}
 }
 
+func TestISOPickerDropsRestoredSelectionOnFolderChange(t *testing.T) {
+	root := t.TempDir()
+	writeFiles(t, root, "old.iso", "next/new.iso")
+	p := newISOPicker(root)
+	p.preselect([]string{filepath.Join(root, "old.iso")})
+	p.load(filepath.Join(root, "next"), "")
+	if got := p.selection(); len(got) != 0 {
+		t.Fatalf("restored selection remains after folder change: %v", got)
+	}
+}
+
 func TestISOPickerEnterUsesHighlightedOrRequiresSelection(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, "only.iso", "sub/x.txt")

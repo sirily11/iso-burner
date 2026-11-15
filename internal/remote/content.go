@@ -24,6 +24,7 @@ type PreviewRequest struct {
 	Description string `json:"description,omitempty"`
 	MimeType    string `json:"mime_type"`
 	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
 	// FilePath is where the original file is kept.
 	FilePath string `json:"file_path"`
 	// VideoLength is the length of a video in seconds.
@@ -72,6 +73,7 @@ type FileContent struct {
 	Description string `json:"description,omitempty"`
 	MimeType    string `json:"mime_type"`
 	Size        int64  `json:"size"`
+	SHA256      string `json:"sha256"`
 	// FilePath is where the original file is kept.
 	FilePath string `json:"file_path"`
 }

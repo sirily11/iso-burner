@@ -30,7 +30,7 @@ func TestRequestPreviewUploads(t *testing.T) {
 	length := 12.5
 	ups, err := NewClient(srv.URL, staticToken("tok")).RequestPreviewUploads(context.Background(), "item1", []PreviewRequest{{
 		Filename: "clip.mov", Type: "video", Title: "clip.mov", MimeType: "video/quicktime",
-		Size: 42, FilePath: "trip/clip.mov", VideoLength: &length,
+		Size: 42, FilePath: "trip/clip.mov", SHA256: "original-hash", VideoLength: &length,
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -43,7 +43,7 @@ func TestRequestPreviewUploads(t *testing.T) {
 	}
 	item := got["items"].([]any)[0].(map[string]any)
 	if item["file_path"] != "trip/clip.mov" || item["mime_type"] != "video/quicktime" ||
-		item["video_length"] != 12.5 || item["size"] != 42.0 || item["type"] != "video" {
+		item["video_length"] != 12.5 || item["size"] != 42.0 || item["type"] != "video" || item["sha256"] != "original-hash" {
 		t.Errorf("item = %v", item)
 	}
 }
@@ -73,7 +73,7 @@ func TestCreateFileContent(t *testing.T) {
 	defer srv.Close()
 
 	err := NewClient(srv.URL, staticToken("tok")).CreateFileContent(context.Background(), "item 1",
-		FileContent{Title: "notes.txt", MimeType: "text/plain", Size: 5, FilePath: "docs/notes.txt"})
+		FileContent{Title: "notes.txt", MimeType: "text/plain", Size: 5, FilePath: "docs/notes.txt", SHA256: "original-hash"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestCreateFileContent(t *testing.T) {
 		t.Errorf("request = %s %v", gotPath, got)
 	}
 	data := got["data"].(map[string]any)
-	if data["title"] != "notes.txt" || data["file_path"] != "docs/notes.txt" || data["size"] != 5.0 {
+	if data["title"] != "notes.txt" || data["file_path"] != "docs/notes.txt" || data["size"] != 5.0 || data["sha256"] != "original-hash" {
 		t.Errorf("data = %v", data)
 	}
 }

@@ -93,6 +93,19 @@ func TestDriveSelectorMultiSelect(t *testing.T) {
 	}
 }
 
+func TestUploadDrivePickerShowsLoadedDiscLabel(t *testing.T) {
+	drives := []drive.Drive{
+		{ID: "E:", Model: "ASUS BW-16D1HT", Detail: "disc loaded", VolumeLabel: "sony-1"},
+		{ID: "H:", Model: "ASUS BW-16D1HT", Detail: "disc loaded", VolumeLabel: "16_11_2025"},
+	}
+	s := loadDrives(t, newSingleDriveSelector(fixedDrives(drives, nil)))
+	for _, want := range []string{"E: · ASUS BW-16D1HT", "Disc: sony-1", "H: · ASUS BW-16D1HT", "Disc: 16_11_2025"} {
+		if !strings.Contains(s.View(), want) {
+			t.Errorf("drive picker missing %q:\n%s", want, s.View())
+		}
+	}
+}
+
 func TestDriveSelectorToggleAll(t *testing.T) {
 	s := loadDrives(t, NewDriveSelector(fixedDrives(testDrives, nil)))
 	s = sendDrive(t, s, key("a"))

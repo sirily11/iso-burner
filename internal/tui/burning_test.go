@@ -122,7 +122,7 @@ func TestBurnProgressIdentifiesMatchingDrives(t *testing.T) {
 				})
 			}
 			view := m.burnProgressView()
-			for _, label := range []string{"E · ASUS BW-16D1HT", "F · ASUS BW-16D1HT"} {
+			for _, label := range []string{"E: · ASUS BW-16D1HT", "F: · ASUS BW-16D1HT"} {
 				if !strings.Contains(view, label) {
 					t.Errorf("drive label %q missing from progress view:\n%s", label, view)
 				}

@@ -138,12 +138,13 @@ type Model struct {
 	recent     recent.Recent
 	recentPath string
 
-	isoHint    string // where the ISO picker starts browsing
-	isoPicker  isoPicker
-	burnISOs   []string
-	burnMenu   bool
-	burnAction int
-	verify     discVerification
+	isoHint           string // where the ISO picker starts browsing
+	isoFolderExplicit bool   // -folder was provided for burn mode
+	isoPicker         isoPicker
+	burnISOs          []string
+	burnMenu          bool
+	burnAction        int
+	verify            discVerification
 
 	replicas        replicaEditor
 	settingReplicas bool           // the copies screen is showing instead of the ISO picker
@@ -237,6 +238,7 @@ func New(opts Options) Model {
 		auth: opts.Auth, authChecking: opts.Auth != nil, printerSvc: opts.Printers,
 		sync: opts.Sync, syncInterval: opts.SyncInterval,
 		recent: last, recentPath: opts.RecentPath}
+	m.isoFolderExplicit = opts.Folder != ""
 	for i, p := range settings.Presets {
 		if p.Name == last.Preset {
 			m.presetIdx = i
@@ -262,7 +264,9 @@ func New(opts Options) Model {
 	m.isoHint = cmp.Or(opts.Folder, last.ISODir, opts.OutputDir)
 	if m.mode == ModeBurn {
 		m.isoPicker = newISOPicker(m.isoHint)
-		m.isoPicker.preselect(m.recent.ISOs)
+		if opts.Folder == "" || sameFolder(opts.Folder, last.ISODir) {
+			m.isoPicker.preselect(m.recent.ISOs)
+		}
 		m.burnMenu = true
 	}
 	if opts.Folder == "" {

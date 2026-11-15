@@ -2,6 +2,7 @@ package upload
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -141,19 +142,40 @@ func writeMedia(t *testing.T, root string) []settings.File {
 	return files
 }
 
-func checkUploaded(t *testing.T, s *fakeServer, files []settings.File) {
+func fixtureFolder(t *testing.T, files []settings.File) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, file := range files {
+		path := filepath.Join(root, filepath.FromSlash(file.RelPath))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+func checkUploaded(t *testing.T, s *fakeServer, files []settings.File, root string) {
 	t.Helper()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sizes := map[string]int64{}
+	hashes := map[string]string{}
 	for _, f := range files {
 		sizes[f.RelPath] = f.Size
+		original, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.RelPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		hashes[f.RelPath] = fmt.Sprintf("%x", sha256.Sum256(original))
 	}
 	if len(s.previews) != 2 || len(s.files) != 1 {
 		t.Fatalf("previews = %+v, files = %+v", s.previews, s.files)
 	}
 	for i, p := range s.previews {
-		if p.Size != sizes[p.FilePath] || p.Title != filepath.Base(p.FilePath) || p.Filename != p.Title {
+		if p.Size != sizes[p.FilePath] || p.Title != filepath.Base(p.FilePath) || p.Filename != p.Title || p.SHA256 != hashes[p.FilePath] {
 			t.Errorf("preview %d = %+v", i, p)
 		}
 		thumb := s.puts[fmt.Sprintf("%d-thumb", i+1)]
@@ -177,7 +199,7 @@ func checkUploaded(t *testing.T, s *fakeServer, files []settings.File) {
 			t.Errorf("unexpected preview for %s", p.FilePath)
 		}
 	}
-	if f := s.files[0]; f.FilePath != "notes.txt" || f.Title != "notes.txt" || f.MimeType != "application/octet-stream" || f.Size != 5 {
+	if f := s.files[0]; f.FilePath != "notes.txt" || f.Title != "notes.txt" || f.MimeType != "application/octet-stream" || f.Size != 5 || f.SHA256 != hashes[f.FilePath] {
 		t.Errorf("file content = %+v", f)
 	}
 }
@@ -203,7 +225,7 @@ func TestRunFromFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkAllDone(t, p)
-	checkUploaded(t, s, files)
+	checkUploaded(t, s, files, root)
 
 	// Running again replaces the images and videos the item already has
 	// rather than failing on them.
@@ -241,7 +263,7 @@ func TestRunFromISO(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkAllDone(t, p)
-	checkUploaded(t, s, isoFiles)
+	checkUploaded(t, s, isoFiles, source)
 }
 
 func TestRunMissingFileContinues(t *testing.T) {
@@ -310,7 +332,7 @@ func TestRunUploadsFilesInParallel(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	p := NewProgress(files)
-	job := Job{Client: remote.NewClient(srv.URL, testToken{}), ItemID: "item1", Folder: t.TempDir(), Files: files}
+	job := Job{Client: remote.NewClient(srv.URL, testToken{}), ItemID: "item1", Folder: fixtureFolder(t, files), Files: files}
 	if err := job.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +353,11 @@ func TestRunPreparesWhileThreeUploadsAreBusy(t *testing.T) {
 	}
 	files := make([]settings.File, 0, 6)
 	for i := range 3 {
-		files = append(files, settings.File{RelPath: fmt.Sprintf("file%d.txt", i), Size: 1})
+		name := fmt.Sprintf("file%d.txt", i)
+		if err := os.WriteFile(filepath.Join(root, name), []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		files = append(files, settings.File{RelPath: name, Size: 1})
 	}
 	for i := range 3 {
 		name := fmt.Sprintf("clip%d.mov", i)
@@ -379,7 +405,9 @@ func TestRunPreparesWhileThreeUploadsAreBusy(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	p := NewProgress(files)
-	job := Job{Client: remote.NewClient(srv.URL, testToken{}), ItemID: "item1", Folder: root, Files: files}
+	client := remote.NewClient(srv.URL, testToken{})
+	client.HTTP.Timeout = time.Minute // blocked uploads must outlive preview preparation
+	job := Job{Client: client, ItemID: "item1", Folder: root, Files: files}
 	done := make(chan error, 1)
 	go func() { done <- job.Run(context.Background(), p) }()
 	for range 3 {
@@ -391,7 +419,7 @@ func TestRunPreparesWhileThreeUploadsAreBusy(t *testing.T) {
 			t.Fatal("three uploads did not start")
 		}
 	}
-	deadline := time.After(20 * time.Second)
+	deadline := time.After(30 * time.Second)
 	for {
 		st := p.Snapshot()
 		ready, uploading := 0, 0
@@ -465,7 +493,7 @@ func TestRunRetriesFailedFiles(t *testing.T) {
 		return 0
 	})
 	p := NewProgress(files)
-	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, Workers: 1, RetryDelay: -1}
+	job := Job{Client: client, ItemID: "item1", Folder: fixtureFolder(t, files), Files: files, Workers: 1, RetryDelay: -1}
 	if err := job.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +524,7 @@ func TestRunRetriesAfterQueuedFiles(t *testing.T) {
 		return 0
 	})
 	p := NewProgress(files)
-	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, Workers: 1, RetryDelay: -1}
+	job := Job{Client: client, ItemID: "item1", Folder: fixtureFolder(t, files), Files: files, Workers: 1, RetryDelay: -1}
 	if err := job.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -510,7 +538,7 @@ func TestRunDoesNotRetryRejectedFiles(t *testing.T) {
 	files := []settings.File{{RelPath: "dup.txt", Size: 1}}
 	client, tries := flakyServer(t, func(string, int) int { return http.StatusBadRequest })
 	p := NewProgress(files)
-	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, RetryDelay: -1}
+	job := Job{Client: client, ItemID: "item1", Folder: fixtureFolder(t, files), Files: files, RetryDelay: -1}
 	if err := job.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -530,7 +558,7 @@ func TestRetryFailedRunsFailedFilesAgain(t *testing.T) {
 		return 0
 	})
 	p := NewProgress(files)
-	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, Attempts: 2, RetryDelay: -1}
+	job := Job{Client: client, ItemID: "item1", Folder: fixtureFolder(t, files), Files: files, Attempts: 2, RetryDelay: -1}
 	if err := job.Run(context.Background(), p); err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +595,7 @@ func TestRetryFailedWhileRunning(t *testing.T) {
 		return 0
 	})
 	p := NewProgress(files)
-	job := Job{Client: client, ItemID: "item1", Folder: t.TempDir(), Files: files, Workers: 2, RetryDelay: -1}
+	job := Job{Client: client, ItemID: "item1", Folder: fixtureFolder(t, files), Files: files, Workers: 2, RetryDelay: -1}
 	done := make(chan error)
 	go func() { done <- job.Run(context.Background(), p) }()
 	deadline := time.Now().Add(5 * time.Second)

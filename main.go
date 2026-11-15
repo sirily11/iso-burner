@@ -193,6 +193,11 @@ func burnSummary(m tui.Model, dbPath string) int {
 	if snap.Skipped > 0 {
 		counts += fmt.Sprintf("; %d skipped", snap.Skipped)
 	}
+	defer func() {
+		for _, disc := range m.BurnedDiscs() {
+			fmt.Printf("  %s  %s\n", disc.DriveID, filepath.Base(disc.ISOPath))
+		}
+	}()
 	switch {
 	case snap.Err != nil:
 		fmt.Fprintln(os.Stderr, "burning failed:", snap.Err)

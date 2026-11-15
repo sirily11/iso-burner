@@ -172,6 +172,9 @@ func TestBurnSyncsDrivesAndISOs(t *testing.T) {
 
 	m = tickUntil(t, m, "burning", func(m Model) bool { return strings.Contains(m.View(), "burning backup_1.iso") })
 	waitUntil(t, "burning report", func() bool {
+		if server.count() == 0 {
+			return false
+		}
 		_, job := server.last(t)
 		return len(job.Tasks) == 2 && job.Tasks[0].Status == "burning"
 	})

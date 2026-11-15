@@ -13,7 +13,9 @@ import (
 // startBurn opens the burn/verify submenu.
 func (m Model) startBurn() (tea.Model, tea.Cmd) {
 	m.isoPicker = newISOPicker(m.isoHint)
-	m.isoPicker.preselect(m.recent.ISOs)
+	if sameFolder(m.isoPicker.dir, m.recent.ISODir) {
+		m.isoPicker.preselect(m.recent.ISOs)
+	}
 	m.burnISOs, m.burnDrives = nil, nil
 	m.burnJobs, m.settingReplicas = nil, false
 	m.resuming, m.burnErr = nil, nil

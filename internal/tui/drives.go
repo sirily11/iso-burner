@@ -212,7 +212,7 @@ func (s DriveSelector) body() string {
 		b.WriteString(dimStyle.Render("No disc drives found. Connect a drive and press r to rescan.") + "\n")
 	default:
 		for i, d := range s.drives {
-			line := d.Name()
+			line := d.ID + " · " + d.Name()
 			if !s.single {
 				box := "[ ]"
 				if s.selected[d.ID] {
@@ -225,7 +225,13 @@ func (s DriveSelector) body() string {
 			} else {
 				line = "  " + line
 			}
-			b.WriteString(line + "  " + dimStyle.Render(driveInfo(d)) + "\n")
+			if d.Detail != "" {
+				line += "  " + dimStyle.Render(d.Detail)
+			}
+			if d.VolumeLabel != "" {
+				line += "  " + labelStyle.Render("Disc: "+d.VolumeLabel)
+			}
+			b.WriteString(line + "\n")
 		}
 		if !s.single {
 			b.WriteString("\n" + okStyle.Render(fmt.Sprintf("%d of %d drive(s) selected", len(s.selected), len(s.drives))) + "\n")

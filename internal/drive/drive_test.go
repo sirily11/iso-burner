@@ -35,14 +35,14 @@ func TestParseDrutilNoDrives(t *testing.T) {
 }
 
 func TestParseWindows(t *testing.T) {
-	many := `[{"Drive":"E:","Caption":"HL-DT-ST BD-RE WH16NS60","Manufacturer":"(Standard CD-ROM drives)","MediaLoaded":true},` +
+	many := `[{"Drive":"E:","Caption":"HL-DT-ST BD-RE WH16NS60","Manufacturer":"(Standard CD-ROM drives)","MediaLoaded":true,"VolumeName":"ARCHIVE_2026"},` +
 		`{"Drive":"F:","Caption":"PIONEER BD-RW BDR-XD07","Manufacturer":"Pioneer","MediaLoaded":false}]`
 	got, err := parseWindows([]byte(many))
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := []Drive{
-		{ID: "E:", Model: "HL-DT-ST BD-RE WH16NS60", Detail: "disc loaded"},
+		{ID: "E:", Model: "HL-DT-ST BD-RE WH16NS60", Detail: "disc loaded", VolumeLabel: "ARCHIVE_2026"},
 		{ID: "F:", Vendor: "Pioneer", Model: "PIONEER BD-RW BDR-XD07", Detail: "no disc"},
 	}
 	if !reflect.DeepEqual(got, want) {
@@ -57,6 +57,25 @@ func TestParseWindows(t *testing.T) {
 		if got, err := parseWindows([]byte(empty)); err != nil || len(got) != 0 {
 			t.Fatalf("%q: got %+v, %v", empty, got, err)
 		}
+	}
+}
+
+func TestPopulateWindowsVolumeLabels(t *testing.T) {
+	drives := []Drive{
+		{ID: "E:", Detail: "disc loaded"},
+		{ID: "H:", Detail: "disc loaded"},
+		{ID: "F:", Detail: "no disc"},
+	}
+	var queried []string
+	populateWindowsVolumeLabels(drives, func(id string) string {
+		queried = append(queried, id)
+		return map[string]string{"E:": "sony-1", "H:": "16_11_2025"}[id]
+	})
+	if !reflect.DeepEqual(queried, []string{"E:", "H:"}) {
+		t.Fatalf("queried %v, want loaded drives only", queried)
+	}
+	if drives[0].VolumeLabel != "sony-1" || drives[1].VolumeLabel != "16_11_2025" || drives[2].VolumeLabel != "" {
+		t.Fatalf("labels: %+v", drives)
 	}
 }
 

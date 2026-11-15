@@ -161,6 +161,13 @@ func (m Model) uploadConflictsView() string {
 	file := f.matched[c.files[c.at]]
 	name := path.Base(file.RelPath)
 	var b strings.Builder
+	if f.rule == ruleDisc {
+		b.WriteString(labelStyle.Render("Drive") + "  " + f.disc.ID + " · " + f.disc.Name() + "\n")
+		if f.discLabel != "" {
+			b.WriteString(labelStyle.Render("Disc") + "  " + f.discLabel + "\n")
+		}
+		b.WriteString("\n")
+	}
 	b.WriteString(errorStyle.Render(fmt.Sprintf("%d of %d file(s) are already on the item", len(c.files), len(f.matched))) + "\n")
 	b.WriteString(dimStyle.Render(fmt.Sprintf("File %d of %d", c.at+1, len(c.files))) + "\n\n")
 	b.WriteString(labelStyle.Render(truncate(name, 60)) + "\n")

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -12,6 +13,22 @@ import (
 
 	"github.com/sirily11/iso-burner/internal/settings"
 )
+
+// sameFolder compares folder paths without depending on how the user typed them.
+func sameFolder(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	a, errA := filepath.Abs(a)
+	b, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
+	}
+	return filepath.Clean(a) == filepath.Clean(b)
+}
 
 // isoEntry is one row in the ISO picker: a subfolder or an .iso file.
 type isoEntry struct {
@@ -29,6 +46,7 @@ type isoPicker struct {
 	offset     int
 	showHidden bool
 	selected   map[string]int64 // absolute path → size
+	restored   map[string]bool  // selections restored from a previous run
 	single     bool             // enter picks the highlighted ISO; nothing is marked
 	err        error
 }
@@ -52,6 +70,10 @@ func (p *isoPicker) preselect(paths []string) {
 	for _, path := range paths {
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && isISO(path) {
 			p.selected[path] = info.Size()
+			if p.restored == nil {
+				p.restored = map[string]bool{}
+			}
+			p.restored[path] = true
 		}
 	}
 }
@@ -65,6 +87,14 @@ func (p *isoPicker) load(dir, focus string) {
 	if err != nil {
 		p.err = err
 		return
+	}
+	// Moving away clears only the previous run's restored choices. ISOs chosen
+	// in this run may still be selected across several folders.
+	if p.dir != "" && !sameFolder(p.dir, dir) {
+		for path := range p.restored {
+			delete(p.selected, path)
+		}
+		p.restored = nil
 	}
 	p.dir, p.err = dir, nil
 	p.entries = p.entries[:0]
